@@ -60,6 +60,71 @@ def _verify_host_key(transport: paramiko.Transport, host: str, port: int) -> Non
             "SFTP server host key does NOT match known_hosts (possible man-in-the-middle)")
 
 
+def _load_private_key(path: str, passphrase: str) -> paramiko.PKey:
+    try:
+        return paramiko.PKey.from_path(os.path.expanduser(path), passphrase=passphrase.encode() if passphrase else None)
+    except paramiko.PasswordRequiredException as exc:
+        raise SftpAuthError("SFTP_PRIVATE_KEY is encrypted: set SFTP_PRIVATE_KEY_PASSPHRASE") from exc
+    except (paramiko.SSHException, ValueError, OSError) as exc:
+        # Also raised for a wrong passphrase or a PuTTY .ppk file (convert it with puttygen)
+        raise SftpAuthError("SFTP_PRIVATE_KEY could not be loaded "
+                            "(wrong passphrase, or not an OpenSSH/PEM key file)") from exc
+
+
+def _authenticate(transport: paramiko.Transport, settings) -> None:
+    """Password first, then whatever extra step the server asks for.
+
+    Some servers (e.g. GoAnywhere) accept the password as a *partial* success
+    and then require a registered SSH key and/or keyboard-interactive.
+    """
+    user = settings.sftp_username
+    try:
+        remaining = transport.auth_password(user, settings.sftp_password)
+    except paramiko.BadAuthenticationType as exc:
+        # Server does not take a password at all: go straight to its methods
+        remaining = exc.allowed_types
+    except paramiko.AuthenticationException as exc:
+        raise SftpAuthError("SFTP authentication failed (wrong username or password)") from exc
+
+    tried = set()
+    while not transport.is_authenticated() and remaining:
+        if "publickey" in remaining and settings.sftp_private_key and "publickey" not in tried:
+            tried.add("publickey")
+            key = _load_private_key(settings.sftp_private_key, settings.sftp_private_key_passphrase)
+            log.info("Password accepted, sending SSH key (%s)", key.fingerprint)
+            try:
+                remaining = transport.auth_publickey(user, key)
+            except paramiko.AuthenticationException as exc:
+                raise SftpAuthError("SFTP server rejected the SSH key "
+                                    "(is its public key registered for this user?)") from exc
+        elif "keyboard-interactive" in remaining and "keyboard-interactive" not in tried:
+            tried.add("keyboard-interactive")
+            log.info("Password accepted, answering keyboard-interactive prompts")
+
+            def answer(_title, _instructions, prompts):
+                # Prompt text is written by the server, not a secret: log it to help diagnose
+                for text, _echo in prompts:
+                    log.info("Server prompt: %r", text)
+                return [settings.sftp_password for _ in prompts]
+
+            try:
+                remaining = transport.auth_interactive(user, answer)
+            except paramiko.AuthenticationException as exc:
+                hint = (" The server also accepts an SSH key: set SFTP_PRIVATE_KEY."
+                        if "publickey" in remaining and not settings.sftp_private_key else "")
+                raise SftpAuthError("SFTP keyboard-interactive step failed "
+                                    f"(see 'Server prompt' in the log).{hint}") from exc
+        else:
+            hint = (" Set SFTP_PRIVATE_KEY to the SSH key registered with the server."
+                    if "publickey" in remaining and not settings.sftp_private_key else "")
+            raise SftpAuthError("SFTP password accepted, but the server also requires: "
+                                f"{', '.join(remaining)}.{hint}")
+
+    if not transport.is_authenticated():
+        raise SftpAuthError("SFTP authentication failed")
+    log.info("SFTP authentication successful")
+
+
 def connect_sftp() -> tuple[paramiko.Transport, paramiko.SFTPClient]:
     """Open an authenticated SFTP session. Caller must close sftp and transport."""
     settings = get_settings()
@@ -89,21 +154,11 @@ def connect_sftp() -> tuple[paramiko.Transport, paramiko.SFTPClient]:
         _verify_host_key(transport, host, port)
 
         try:
-            # Returns the auth methods still required when the password was only a partial success
-            remaining = transport.auth_password(settings.sftp_username, settings.sftp_password)
-        except paramiko.BadAuthenticationType as exc:
-            raise SftpAuthError("SFTP server does not allow password authentication") from exc
-        except paramiko.AuthenticationException as exc:
-            raise SftpAuthError("SFTP authentication failed (wrong username or password)") from exc
+            _authenticate(transport, settings)
         except (paramiko.SSHException, EOFError, OSError) as exc:
+            if isinstance(exc, paramiko.AuthenticationException):
+                raise SftpAuthError(f"SFTP authentication failed: {exc}") from exc
             raise SftpConnectionError("SFTP connection lost during authentication") from exc
-
-        if not transport.is_authenticated():
-            if remaining:
-                raise SftpAuthError(
-                    "SFTP password accepted, but the server also requires: "
-                    f"{', '.join(remaining)} (e.g. publickey = an SSH key registered with the server)")
-            raise SftpAuthError("SFTP authentication failed")
 
         try:
             sftp = paramiko.SFTPClient.from_transport(transport)

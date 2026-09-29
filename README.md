@@ -87,6 +87,8 @@ nano .env
 | `SFTP_PORT` | no (22) | SFTP port |
 | `SFTP_USERNAME` | yes | SFTP login user |
 | `SFTP_PASSWORD` | yes | SFTP login password |
+| `SFTP_PRIVATE_KEY` | no | SSH private key file, used when the server asks for a key after the password (e.g. `/root/.ssh/sbi_sftp_key`) |
+| `SFTP_PRIVATE_KEY_PASSPHRASE` | no | Passphrase of that key, if it has one |
 | `SFTP_REMOTE_FILE` | yes | Full remote path, e.g. `/incoming/customer_data.csv.gpg` |
 | `SFTP_KNOWN_HOSTS` | no | known_hosts file used to verify the server (default `~/.ssh/known_hosts`) |
 | `SFTP_STRICT_HOST_KEY_CHECKING` | no (true) | `true` = refuse unknown/changed servers. Keep `true` in production |

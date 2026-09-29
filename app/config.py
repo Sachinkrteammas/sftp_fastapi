@@ -52,6 +52,8 @@ class Settings:
     sftp_port: int
     sftp_username: str
     sftp_password: str = field(repr=False)
+    sftp_private_key: str
+    sftp_private_key_passphrase: str = field(repr=False)
     sftp_remote_file: str
     sftp_known_hosts: str
     sftp_strict_host_key_checking: bool
@@ -116,6 +118,8 @@ def _validate(s: Settings) -> None:
 
     if not 1 <= s.sftp_port <= 65535:
         raise ConfigError("SFTP_PORT must be between 1 and 65535")
+    if s.sftp_private_key and not Path(s.sftp_private_key).expanduser().is_file():
+        raise ConfigError("SFTP_PRIVATE_KEY file not found")
     if s.sftp_max_file_mb <= 0:
         raise ConfigError("SFTP_MAX_FILE_MB must be greater than 0")
 
@@ -127,6 +131,8 @@ def get_settings() -> Settings:
         sftp_port=_int("SFTP_PORT", 22),
         sftp_username=_str("SFTP_USERNAME"),
         sftp_password=os.getenv("SFTP_PASSWORD", ""),  # not stripped: spaces may be part of a password
+        sftp_private_key=_str("SFTP_PRIVATE_KEY"),
+        sftp_private_key_passphrase=os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", ""),
         sftp_remote_file=_str("SFTP_REMOTE_FILE"),
         sftp_known_hosts=_str("SFTP_KNOWN_HOSTS", "~/.ssh/known_hosts"),
         sftp_strict_host_key_checking=_bool("SFTP_STRICT_HOST_KEY_CHECKING", True),
