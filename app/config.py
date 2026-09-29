@@ -54,6 +54,7 @@ class Settings:
     sftp_password: str = field(repr=False)
     sftp_private_key: str
     sftp_private_key_passphrase: str = field(repr=False)
+    sftp_interactive_response: str = field(repr=False)
     sftp_remote_file: str
     sftp_known_hosts: str
     sftp_strict_host_key_checking: bool
@@ -133,6 +134,7 @@ def get_settings() -> Settings:
         sftp_password=os.getenv("SFTP_PASSWORD", ""),  # not stripped: spaces may be part of a password
         sftp_private_key=_str("SFTP_PRIVATE_KEY"),
         sftp_private_key_passphrase=os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", ""),
+        sftp_interactive_response=os.getenv("SFTP_INTERACTIVE_RESPONSE", ""),
         sftp_remote_file=_str("SFTP_REMOTE_FILE"),
         sftp_known_hosts=_str("SFTP_KNOWN_HOSTS", "~/.ssh/known_hosts"),
         sftp_strict_host_key_checking=_bool("SFTP_STRICT_HOST_KEY_CHECKING", True),

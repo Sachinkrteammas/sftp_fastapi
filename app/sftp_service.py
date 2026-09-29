@@ -95,25 +95,29 @@ def _authenticate(transport: paramiko.Transport, settings) -> None:
             try:
                 remaining = transport.auth_publickey(user, key)
             except paramiko.AuthenticationException as exc:
-                raise SftpAuthError("SFTP server rejected the SSH key "
-                                    "(is its public key registered for this user?)") from exc
+                if "keyboard-interactive" not in remaining:
+                    raise SftpAuthError("SFTP server rejected the SSH key "
+                                        "(is its public key registered for this user?)") from exc
+                log.warning("SSH key not accepted, trying keyboard-interactive instead")
         elif "keyboard-interactive" in remaining and "keyboard-interactive" not in tried:
             tried.add("keyboard-interactive")
             log.info("Password accepted, answering keyboard-interactive prompts")
+            # Some servers ask a second secret here; default is the login password
+            response = settings.sftp_interactive_response or settings.sftp_password
 
             def answer(_title, _instructions, prompts):
                 # Prompt text is written by the server, not a secret: log it to help diagnose
                 for text, _echo in prompts:
                     log.info("Server prompt: %r", text)
-                return [settings.sftp_password for _ in prompts]
+                return [response for _ in prompts]
 
             try:
                 remaining = transport.auth_interactive(user, answer)
             except paramiko.AuthenticationException as exc:
                 hint = (" The server also accepts an SSH key: set SFTP_PRIVATE_KEY."
                         if "publickey" in remaining and not settings.sftp_private_key else "")
-                raise SftpAuthError("SFTP keyboard-interactive step failed "
-                                    f"(see 'Server prompt' in the log).{hint}") from exc
+                raise SftpAuthError("SFTP keyboard-interactive step failed (see 'Server prompt' "
+                                    f"in the log; answer is set by SFTP_INTERACTIVE_RESPONSE).{hint}") from exc
         else:
             hint = (" Set SFTP_PRIVATE_KEY to the SSH key registered with the server."
                     if "publickey" in remaining and not settings.sftp_private_key else "")
