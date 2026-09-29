@@ -8,7 +8,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -84,7 +84,9 @@ app = FastAPI(
 )
 
 
-def verify_api_key(x_api_key: str | None = Header(default=None)) -> None:
+# FastAPI evaluates endpoint/dependency annotations at runtime, so these use
+# typing.Optional/Dict (Python 3.8 has no "X | None" or "dict[...]" at runtime).
+def verify_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     """If API_KEY is set in .env, protected endpoints require header X-API-Key."""
     expected = get_settings().api_key
     if expected and not (x_api_key and secrets.compare_digest(x_api_key, expected)):
@@ -166,7 +168,7 @@ def run_pipeline() -> dict[str, Any]:
 
 
 @app.get("/health", tags=["monitoring"])
-def health() -> dict[str, str]:
+def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
@@ -202,7 +204,7 @@ def process_file():
 
 
 @app.get("/status", tags=["monitoring"], dependencies=[Depends(verify_api_key)])
-def last_status() -> dict[str, Any]:
+def last_status() -> Dict[str, Any]:
     """Result of the last /process-file call since the service started."""
     return {
         "mode": get_settings().process_mode,

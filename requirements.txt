@@ -1,7 +1,8 @@
+# Server runs Python 3.8 -> pandas 2.0.x is the newest release that supports it.
 fastapi>=0.110
 uvicorn[standard]>=0.29
 paramiko>=3.4
 python-gnupg>=0.5.2
 python-dotenv>=1.0
-pandas>=2.1
+pandas>=1.5,<2.1
 mysql-connector-python>=8.3
