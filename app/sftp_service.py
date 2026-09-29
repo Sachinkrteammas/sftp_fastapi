@@ -89,7 +89,8 @@ def connect_sftp() -> tuple[paramiko.Transport, paramiko.SFTPClient]:
         _verify_host_key(transport, host, port)
 
         try:
-            transport.auth_password(settings.sftp_username, settings.sftp_password)
+            # Returns the auth methods still required when the password was only a partial success
+            remaining = transport.auth_password(settings.sftp_username, settings.sftp_password)
         except paramiko.BadAuthenticationType as exc:
             raise SftpAuthError("SFTP server does not allow password authentication") from exc
         except paramiko.AuthenticationException as exc:
@@ -98,6 +99,10 @@ def connect_sftp() -> tuple[paramiko.Transport, paramiko.SFTPClient]:
             raise SftpConnectionError("SFTP connection lost during authentication") from exc
 
         if not transport.is_authenticated():
+            if remaining:
+                raise SftpAuthError(
+                    "SFTP password accepted, but the server also requires: "
+                    f"{', '.join(remaining)} (e.g. publickey = an SSH key registered with the server)")
             raise SftpAuthError("SFTP authentication failed")
 
         try:
