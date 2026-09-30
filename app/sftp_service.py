@@ -101,6 +101,7 @@ def _authenticate(transport: paramiko.Transport, settings) -> None:
                   settings.sftp_interactive_response or settings.sftp_password]
     ki_round = 0
     tried = set()
+    key_rejected = False
 
     while not transport.is_authenticated() and remaining:
         if "publickey" in remaining and settings.sftp_private_key and "publickey" not in tried:
@@ -110,7 +111,23 @@ def _authenticate(transport: paramiko.Transport, settings) -> None:
             try:
                 remaining = transport.auth_publickey(user, key)
             except paramiko.AuthenticationException:
-                log.warning("SSH key not accepted, trying the next login method")
+                accepted = False
+                # paramiko >= 4 dropped ssh-rsa signing: nothing to retry there
+                if key.get_name() == "ssh-rsa" and "ssh-rsa" in transport._preferred_pubkeys:
+                    # Older servers (e.g. GoAnywhere) only verify SHA-1 "ssh-rsa"
+                    # signatures; PuTTY/WinSCP fall back to it the same way
+                    log.warning("SSH key not accepted with rsa-sha2, retrying with ssh-rsa")
+                    transport.disabled_algorithms = {
+                        **transport.disabled_algorithms,
+                        "pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
+                    try:
+                        remaining = transport.auth_publickey(user, key)
+                        accepted = True
+                    except paramiko.AuthenticationException:
+                        pass
+                if not accepted:
+                    key_rejected = True
+                    log.warning("SSH key not accepted, trying the next login method")
 
         elif "keyboard-interactive" in remaining and ki_round < len(ki_answers):
             response = ki_answers[ki_round]
@@ -139,6 +156,9 @@ def _authenticate(transport: paramiko.Transport, settings) -> None:
                 raise SftpAuthError("SFTP authentication failed (wrong username or password)") from exc
 
         else:
+            if key_rejected:
+                raise SftpAuthError("SFTP server rejected the SSH key (SFTP_PRIVATE_KEY is not "
+                                    "registered for this SFTP_USERNAME, or the login order is wrong)")
             hint = (" Set SFTP_PRIVATE_KEY to the SSH key registered with the server."
                     if "publickey" in remaining and not settings.sftp_private_key else "")
             raise SftpAuthError("SFTP login incomplete, the server still requires: "
