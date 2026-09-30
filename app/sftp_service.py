@@ -162,8 +162,8 @@ def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None
             try:
                 remaining = _send_key(transport, user, key)
             except paramiko.AuthenticationException as exc:
-                raise SftpAuthError("SFTP server rejected the SSH key (SFTP_PRIVATE_KEY is not "
-                                    "registered for this SFTP_USERNAME)") from exc
+                raise SftpAuthError("SFTP server rejected the SSH key (key not registered for "
+                                    "this SFTP_USERNAME, or the account is locked after failed logins)") from exc
 
         elif method == "keyboard-interactive":
             ki_round = used[method]
