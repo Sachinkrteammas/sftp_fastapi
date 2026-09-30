@@ -72,7 +72,12 @@ def _load_private_key(path: str, passphrase: str) -> paramiko.PKey:
         raise SftpAuthError("SFTP_PRIVATE_KEY is a PuTTY .ppk file. Convert it: "
                             "puttygen key.ppk -O private-openssh -o sbi_sftp_key")
     try:
-        return paramiko.PKey.from_path(path, passphrase=passphrase.encode() if passphrase else None)
+        try:
+            return paramiko.PKey.from_path(path, passphrase=passphrase.encode() if passphrase else None)
+        except TypeError:
+            # "Password was given but private key is not encrypted": passphrase not needed
+            log.warning("SFTP_PRIVATE_KEY is not encrypted, ignoring SFTP_PRIVATE_KEY_PASSPHRASE")
+            return paramiko.PKey.from_path(path)
     except paramiko.PasswordRequiredException as exc:
         raise SftpAuthError("SFTP_PRIVATE_KEY is encrypted: set SFTP_PRIVATE_KEY_PASSPHRASE") from exc
     except (paramiko.SSHException, ValueError, OSError) as exc:
