@@ -93,9 +93,10 @@ def _validate(s: Settings) -> None:
     missing = [name for name, value in (
         ("SFTP_HOST", s.sftp_host),
         ("SFTP_USERNAME", s.sftp_username),
-        ("SFTP_PASSWORD", s.sftp_password),
         ("SFTP_REMOTE_FILE", s.sftp_remote_file),
     ) if not value]
+    if not s.sftp_password and not s.sftp_private_key:
+        missing.append("SFTP_PASSWORD or SFTP_PRIVATE_KEY")
 
     if s.process_mode not in VALID_MODES:
         raise ConfigError(f"PROCESS_MODE must be one of: {', '.join(VALID_MODES)}")

@@ -86,7 +86,7 @@ nano .env
 | `SFTP_HOST` | yes | SFTP server host name or IP |
 | `SFTP_PORT` | no (22) | SFTP port |
 | `SFTP_USERNAME` | yes | SFTP login user |
-| `SFTP_PASSWORD` | yes | SFTP login password |
+| `SFTP_PASSWORD` | yes, unless `SFTP_PRIVATE_KEY` is set | SFTP login password |
 | `SFTP_PRIVATE_KEY` | no | SSH private key file, used when the server asks for a key after the password (e.g. `/root/.ssh/sbi_sftp_key`) |
 | `SFTP_PRIVATE_KEY_PASSPHRASE` | no | Passphrase of that key, if it has one |
 | `SFTP_INTERACTIVE_RESPONSE` | no | Answer for the keyboard-interactive prompt the server may show after the password (default: `SFTP_PASSWORD`) |
@@ -121,6 +121,30 @@ ssh-keyscan -p 22 sftp.example.com >> ~/.ssh/known_hosts
 # verify the fingerprint with your SFTP provider:
 ssh-keygen -lf ~/.ssh/known_hosts
 ```
+
+### SSH key login (e.g. SBI)
+
+The public half of the key must already be registered with the SFTP provider.
+paramiko cannot read PuTTY `.ppk` files, so convert the original `.ppk` once
+(it asks for the key passphrase; the output stays encrypted with it):
+
+```bash
+puttygen sbi_key.ppk -O private-openssh -o sbi_sftp_key
+# Windows without puttygen CLI: PuTTYgen → Load → Conversions → Export OpenSSH key
+mkdir -p /opt/sftp_fastapi/keys && mv sbi_sftp_key /opt/sftp_fastapi/keys/
+chmod 700 /opt/sftp_fastapi/keys && chmod 600 /opt/sftp_fastapi/keys/sbi_sftp_key
+```
+
+Then in `.env`:
+
+```text
+SFTP_PRIVATE_KEY=/opt/sftp_fastapi/keys/sbi_sftp_key
+SFTP_PRIVATE_KEY_PASSPHRASE=<passphrase of the .ppk>
+SFTP_PASSWORD=<only if the server also asks for a password>
+```
+
+Keep key files outside the repo. Always copy the `.ppk` as a file: never paste
+it through Excel/Sheets, which turns lines starting with `+`/`=`/`-` into `#NAME?`.
 
 ---
 

@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 venv/
 .idea/
+*.ppk
+*.pem
+keys/
+*_sftp_key

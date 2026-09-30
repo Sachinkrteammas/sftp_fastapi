@@ -61,12 +61,22 @@ def _verify_host_key(transport: paramiko.Transport, host: str, port: int) -> Non
 
 
 def _load_private_key(path: str, passphrase: str) -> paramiko.PKey:
+    path = os.path.expanduser(path)
     try:
-        return paramiko.PKey.from_path(os.path.expanduser(path), passphrase=passphrase.encode() if passphrase else None)
+        with open(path, "rb") as fh:
+            header = fh.read(32)
+    except OSError as exc:
+        raise SftpAuthError("SFTP_PRIVATE_KEY file could not be read") from exc
+    if header.startswith(b"PuTTY-User-Key-File"):
+        # paramiko cannot read .ppk files; convert once with puttygen (see README)
+        raise SftpAuthError("SFTP_PRIVATE_KEY is a PuTTY .ppk file. Convert it: "
+                            "puttygen key.ppk -O private-openssh -o sbi_sftp_key")
+    try:
+        return paramiko.PKey.from_path(path, passphrase=passphrase.encode() if passphrase else None)
     except paramiko.PasswordRequiredException as exc:
         raise SftpAuthError("SFTP_PRIVATE_KEY is encrypted: set SFTP_PRIVATE_KEY_PASSPHRASE") from exc
     except (paramiko.SSHException, ValueError, OSError) as exc:
-        # Also raised for a wrong passphrase or a PuTTY .ppk file (convert it with puttygen)
+        # Also raised for a wrong passphrase
         raise SftpAuthError("SFTP_PRIVATE_KEY could not be loaded "
                             "(wrong passphrase, or not an OpenSSH/PEM key file)") from exc
 
