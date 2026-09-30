@@ -18,6 +18,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 VALID_MODES = ("preview", "save")
+_LOGIN_METHODS = ("publickey", "password", "keyboard-interactive")
 
 
 class ConfigError(Exception):
@@ -55,6 +56,7 @@ class Settings:
     sftp_private_key: str
     sftp_private_key_passphrase: str = field(repr=False)
     sftp_interactive_response: str = field(repr=False)
+    sftp_login_order: tuple
     sftp_remote_file: str
     sftp_known_hosts: str
     sftp_strict_host_key_checking: bool
@@ -122,6 +124,9 @@ def _validate(s: Settings) -> None:
         raise ConfigError("SFTP_PORT must be between 1 and 65535")
     if s.sftp_private_key and not Path(s.sftp_private_key).expanduser().is_file():
         raise ConfigError("SFTP_PRIVATE_KEY file not found")
+    bad = [m for m in s.sftp_login_order if m not in _LOGIN_METHODS]
+    if bad:
+        raise ConfigError(f"SFTP_LOGIN_ORDER may only contain: {', '.join(_LOGIN_METHODS)}")
     if s.sftp_max_file_mb <= 0:
         raise ConfigError("SFTP_MAX_FILE_MB must be greater than 0")
 
@@ -136,6 +141,7 @@ def get_settings() -> Settings:
         sftp_private_key=_str("SFTP_PRIVATE_KEY"),
         sftp_private_key_passphrase=os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", ""),
         sftp_interactive_response=os.getenv("SFTP_INTERACTIVE_RESPONSE", ""),
+        sftp_login_order=tuple(m.strip().lower() for m in _str("SFTP_LOGIN_ORDER").split(",") if m.strip()),
         sftp_remote_file=_str("SFTP_REMOTE_FILE"),
         sftp_known_hosts=_str("SFTP_KNOWN_HOSTS", "~/.ssh/known_hosts"),
         sftp_strict_host_key_checking=_bool("SFTP_STRICT_HOST_KEY_CHECKING", True),

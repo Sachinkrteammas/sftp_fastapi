@@ -90,6 +90,7 @@ nano .env
 | `SFTP_PRIVATE_KEY` | no | SSH private key file, used when the server asks for a key after the password (e.g. `/root/.ssh/sbi_sftp_key`) |
 | `SFTP_PRIVATE_KEY_PASSPHRASE` | no | Passphrase of that key, if it has one |
 | `SFTP_INTERACTIVE_RESPONSE` | no | Answer for the keyboard-interactive prompt the server may show after the password (default: `SFTP_PASSWORD`) |
+| `SFTP_LOGIN_ORDER` | no | Login order for key + password servers, e.g. `publickey,password`. Empty = try all orders on fresh connections; the log prints the one that worked |
 | `SFTP_REMOTE_FILE` | yes | Full remote path, e.g. `/incoming/customer_data.csv.gpg` |
 | `SFTP_KNOWN_HOSTS` | no | known_hosts file used to verify the server (default `~/.ssh/known_hosts`) |
 | `SFTP_STRICT_HOST_KEY_CHECKING` | no (true) | `true` = refuse unknown/changed servers. Keep `true` in production |
