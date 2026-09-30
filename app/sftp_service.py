@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 
 import paramiko
+from paramiko.auth_handler import AuthHandler
+from paramiko.message import Message
 
 from .config import get_settings
 from .logger import get_logger
@@ -86,51 +89,60 @@ def _load_private_key(path: str, passphrase: str) -> paramiko.PKey:
                             "(wrong passphrase, or not an OpenSSH/PEM key file)") from exc
 
 
-# Orders tried when the server wants several methods (key AND password).
-# GoAnywhere (SBI) loops forever (key -> password -> key -> ...) with some orders,
-# so each order runs on a fresh connection until one completes.
-LOGIN_ORDERS = (
-    ("publickey", "password"),
-    ("password", "publickey"),
-    ("keyboard-interactive", "publickey"),
-    ("publickey", "keyboard-interactive"),
-)
+DEFAULT_LOGIN_ORDER = ("publickey", "keyboard-interactive", "password")
 
 
-class _LoginLoop(SftpAuthError):
-    """Server asked again for a method it already accepted: try another order."""
+def _auth_step(transport: paramiko.Transport, method: str, *args) -> list:
+    """Run one login method inside the login already started by auth_none.
+
+    paramiko's transport.auth_*() send a new SERVICE_REQUEST("ssh-userauth")
+    before every method. GoAnywhere (SBI) treats that as a new login and forgets
+    the earlier partial success, so key + password loops forever. WinSCP/OpenSSH
+    send it once: do the same by building the USERAUTH_REQUEST directly.
+    Returns the methods the server still wants ([] = logged in).
+    """
+    handler = AuthHandler(transport)
+    accept = Message()
+    accept.add_string("ssh-userauth")
+    accept.rewind()
+    handler._request_auth = lambda: handler._parse_service_accept(accept)
+    transport.auth_handler = handler
+    event = threading.Event()
+    getattr(handler, "auth_" + method.replace("-", "_"))(*args, event)
+    return handler.wait_for_response(event)
 
 
 def _send_key(transport: paramiko.Transport, user: str, key: paramiko.PKey) -> list:
-    """auth_publickey, falling back to the SHA-1 "ssh-rsa" signature for RSA keys."""
+    """Send the SSH key, falling back to the SHA-1 "ssh-rsa" signature for RSA keys."""
     try:
-        return transport.auth_publickey(user, key)
+        return _auth_step(transport, "publickey", user, key)
     except paramiko.AuthenticationException:
         # paramiko >= 4 dropped ssh-rsa signing: nothing to retry there
         if key.get_name() != "ssh-rsa" or "ssh-rsa" not in transport._preferred_pubkeys:
             raise
-    # Older servers (e.g. GoAnywhere) only verify SHA-1 "ssh-rsa" signatures;
-    # PuTTY/WinSCP fall back to it the same way
+    # Older servers only verify SHA-1 "ssh-rsa" signatures; PuTTY/WinSCP fall back the same way
     log.warning("SSH key not accepted with rsa-sha2, retrying with ssh-rsa")
     transport.disabled_algorithms = {**transport.disabled_algorithms,
                                      "pubkeys": ["rsa-sha2-512", "rsa-sha2-256"]}
-    return transport.auth_publickey(user, key)
+    return _auth_step(transport, "publickey", user, key)
 
 
-def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None:
-    """Log in using the methods the server asks for, preferring them in `order`.
+def _authenticate(transport: paramiko.Transport, settings) -> None:
+    """One login attempt: the methods the server asks for, preferring SFTP_LOGIN_ORDER.
 
-    Each method is used once; keyboard-interactive a second time only when
-    SFTP_INTERACTIVE_RESPONSE is set (answer for a second password prompt).
+    Each method is sent once (keyboard-interactive a second time only when
+    SFTP_INTERACTIVE_RESPONSE is set). If the server asks again for a method it
+    already accepted, stop instead of retrying, so the account is not locked.
     """
     user = settings.sftp_username
+    order = settings.sftp_login_order or DEFAULT_LOGIN_ORDER
     try:
-        transport.auth_none(user)  # asks the server which methods it accepts
+        transport.auth_none(user)  # starts the login and asks which methods are accepted
     except paramiko.BadAuthenticationType as exc:
         remaining = list(exc.allowed_types)
     else:
         remaining = []
-    log.info("Server login methods: %s (trying order: %s)",
+    log.info("Server login methods: %s (order: %s)",
              ", ".join(remaining) or "none needed", " -> ".join(order))
 
     ki_answers = [settings.sftp_password]
@@ -140,8 +152,7 @@ def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None
               "password": bool(settings.sftp_password),
               "keyboard-interactive": bool(settings.sftp_password)}
     limit = {"keyboard-interactive": len(ki_answers)}
-    preference = list(order) + [m for m in ("publickey", "keyboard-interactive", "password")
-                                if m not in order]
+    preference = list(order) + [m for m in DEFAULT_LOGIN_ORDER if m not in order]
     used = {}
 
     while not transport.is_authenticated() and remaining:
@@ -149,7 +160,8 @@ def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None
         method = next((m for m in choices if used.get(m, 0) < limit.get(m, 1)), None)
         if method is None:
             if choices:
-                raise _LoginLoop("server asks again for: " + ", ".join(remaining))
+                raise SftpAuthError("SFTP login never completes: the server asks again for "
+                                    f"{', '.join(remaining)} after accepting it")
             hint = (" Set SFTP_PRIVATE_KEY to the SSH key registered with the server."
                     if "publickey" in remaining and not settings.sftp_private_key else "")
             raise SftpAuthError("SFTP login incomplete, the server still requires: "
@@ -177,7 +189,7 @@ def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None
 
             log.info("Sending password (keyboard-interactive)")
             try:
-                remaining = transport.auth_interactive(user, answer)
+                remaining = _auth_step(transport, "interactive", user, answer)
             except paramiko.AuthenticationException as exc:
                 which = "SFTP_PASSWORD" if ki_round == 1 else "SFTP_INTERACTIVE_RESPONSE"
                 raise SftpAuthError(f"SFTP login rejected at password prompt {ki_round} "
@@ -186,7 +198,7 @@ def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None
         else:
             log.info("Sending password (password method)")
             try:
-                remaining = transport.auth_password(user, settings.sftp_password)
+                remaining = _auth_step(transport, "password", user, settings.sftp_password)
             except paramiko.AuthenticationException as exc:
                 raise SftpAuthError("SFTP authentication failed (wrong username or password)") from exc
 
@@ -195,7 +207,7 @@ def _authenticate(transport: paramiko.Transport, settings, order: tuple) -> None
 
     if not transport.is_authenticated():
         raise SftpAuthError("SFTP authentication failed")
-    log.info("SFTP authentication successful (order: %s)", " -> ".join(order))
+    log.info("SFTP authentication successful")
 
 
 def _open_transport(settings) -> paramiko.Transport:
@@ -230,46 +242,34 @@ def _open_transport(settings) -> paramiko.Transport:
 
 
 def connect_sftp() -> tuple[paramiko.Transport, paramiko.SFTPClient]:
-    """Open an authenticated SFTP session. Caller must close sftp and transport."""
+    """Open an authenticated SFTP session (one connection, one login attempt).
+
+    Caller must close sftp and transport.
+    """
     settings = get_settings()
     log.info("SFTP connection started: %s:%s as user '%s'",
              settings.sftp_host, settings.sftp_port, settings.sftp_username)
-    orders = [settings.sftp_login_order] if settings.sftp_login_order else list(LOGIN_ORDERS)
-
-    for number, order in enumerate(orders, 1):
-        transport = _open_transport(settings)
+    transport = _open_transport(settings)
+    try:
         try:
-            try:
-                _authenticate(transport, settings, order)
-            except _LoginLoop as exc:
-                if number == len(orders):
-                    raise SftpAuthError("SFTP login never completes: the server keeps asking "
-                                        f"for the same methods ({exc})") from exc
-                log.warning("Login order %s does not complete (%s), reconnecting with the next order",
-                            " -> ".join(order), exc)
-                transport.close()
-                continue
-            except (paramiko.SSHException, EOFError, OSError) as exc:
-                if isinstance(exc, paramiko.AuthenticationException):
-                    raise SftpAuthError(f"SFTP authentication failed: {exc}") from exc
-                raise SftpConnectionError("SFTP connection lost during authentication") from exc
+            _authenticate(transport, settings)
+        except (paramiko.SSHException, EOFError, OSError) as exc:
+            if isinstance(exc, paramiko.AuthenticationException):
+                raise SftpAuthError(f"SFTP authentication failed: {exc}") from exc
+            raise SftpConnectionError("SFTP connection lost during authentication") from exc
 
-            if not settings.sftp_login_order and number > 1:
-                log.info("Tip: set SFTP_LOGIN_ORDER=%s in .env to log in with one connection",
-                         ",".join(order))
-            try:
-                sftp = paramiko.SFTPClient.from_transport(transport)
-            except (paramiko.SSHException, EOFError, OSError) as exc:
-                raise SftpConnectionError("Could not open SFTP channel") from exc
-            if sftp is None:
-                raise SftpConnectionError("Could not open SFTP channel")
+        try:
+            sftp = paramiko.SFTPClient.from_transport(transport)
+        except (paramiko.SSHException, EOFError, OSError) as exc:
+            raise SftpConnectionError("Could not open SFTP channel") from exc
+        if sftp is None:
+            raise SftpConnectionError("Could not open SFTP channel")
 
-            log.info("SFTP connection successful")
-            return transport, sftp
-        except Exception:
-            transport.close()
-            raise
-    raise SftpAuthError("SFTP authentication failed")  # not reached
+        log.info("SFTP connection successful")
+        return transport, sftp
+    except Exception:
+        transport.close()
+        raise
 
 
 def read_remote_file(remote_path: str | None = None) -> bytes:
