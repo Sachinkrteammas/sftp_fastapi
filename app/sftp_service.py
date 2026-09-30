@@ -101,15 +101,23 @@ def _authenticate(transport: paramiko.Transport, settings) -> None:
                   settings.sftp_interactive_response or settings.sftp_password]
     ki_round = 0
     tried = set()
+    key = None
+    key_sends = 0
     key_rejected = False
 
     while not transport.is_authenticated() and remaining:
-        if "publickey" in remaining and settings.sftp_private_key and "publickey" not in tried:
-            tried.add("publickey")
-            key = _load_private_key(settings.sftp_private_key, settings.sftp_private_key_passphrase)
-            log.info("Sending SSH key (%s)", key.fingerprint)
+        # GoAnywhere (SBI) accepts the key, then the password, then asks for the key
+        # again: send it a second time, like WinSCP/PuTTY answer whatever is asked
+        if ("publickey" in remaining and settings.sftp_private_key
+                and key_sends < 2 and not key_rejected):
+            key_sends += 1
+            if key is None:
+                key = _load_private_key(settings.sftp_private_key, settings.sftp_private_key_passphrase)
+            log.info("Sending SSH key (%s), attempt %d", key.fingerprint, key_sends)
             try:
                 remaining = transport.auth_publickey(user, key)
+                if remaining:
+                    log.info("SSH key accepted, server asks for more: %s", ", ".join(remaining))
             except paramiko.AuthenticationException:
                 accepted = False
                 # paramiko >= 4 dropped ssh-rsa signing: nothing to retry there
@@ -123,6 +131,8 @@ def _authenticate(transport: paramiko.Transport, settings) -> None:
                     try:
                         remaining = transport.auth_publickey(user, key)
                         accepted = True
+                        if remaining:
+                            log.info("SSH key accepted, server asks for more: %s", ", ".join(remaining))
                     except paramiko.AuthenticationException:
                         pass
                 if not accepted:
