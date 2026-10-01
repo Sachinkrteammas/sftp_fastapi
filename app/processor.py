@@ -13,19 +13,17 @@ log = get_logger("processor")
 
 # ---------------------------------------------------------------------------
 # Edit these to match your file and your Dialer table.
-# Left side  = column name in the CSV (lowercase)
-# Right side = column name in DIALER_TARGET_TABLE
-COLUMN_MAPPING: dict[str, str] = {
-    "phone": "phone",
-    "name": "name",
-    "city": "city",
-}
+# None = keep every CSV column with its own (lowercased) name, e.g. the SBI file.
+# Or a dict: left = column name in the CSV, right = column in DIALER_TARGET_TABLE.
+COLUMN_MAPPING: dict[str, str] | None = None
 # CSV columns that must exist in the header
-REQUIRED_SOURCE_COLUMNS: tuple[str, ...] = ("phone", "name")
+REQUIRED_SOURCE_COLUMNS: tuple[str, ...] = ("account_no",)
 # Target columns that must not be empty in a row (row is skipped otherwise)
-REQUIRED_VALUES: tuple[str, ...] = ("phone", "name")
+REQUIRED_VALUES: tuple[str, ...] = ()
 # Max length per target column (values are cut to fit the DB column)
-MAX_LENGTHS: dict[str, int] = {"phone": 20, "name": 100, "city": 100}
+MAX_LENGTHS: dict[str, int] = {}
+# Column cleaned to digits and checked for length, then used to drop duplicates (None = off)
+PHONE_COLUMN: str | None = None
 PHONE_MIN_DIGITS = 7
 PHONE_MAX_DIGITS = 15
 # ---------------------------------------------------------------------------
@@ -83,19 +81,22 @@ def validate_columns(df: pd.DataFrame) -> None:
 
 
 def transform(df: pd.DataFrame) -> list[dict[str, str]]:
+    mapping = COLUMN_MAPPING or {column: column for column in df.columns}
     out = pd.DataFrame(index=df.index)
-    for source, target in COLUMN_MAPPING.items():
+    for source, target in mapping.items():
         values = df[source] if source in df.columns else pd.Series("", index=df.index)
         out[target] = values.astype(str).str.strip()
 
-    out["phone"] = out["phone"].str.replace(r"\D", "", regex=True)
-
-    valid = out["phone"].str.len().between(PHONE_MIN_DIGITS, PHONE_MAX_DIGITS)
+    valid = pd.Series(True, index=out.index)
+    if PHONE_COLUMN:
+        out[PHONE_COLUMN] = out[PHONE_COLUMN].str.replace(r"\D", "", regex=True)
+        valid &= out[PHONE_COLUMN].str.len().between(PHONE_MIN_DIGITS, PHONE_MAX_DIGITS)
     for column in REQUIRED_VALUES:
         valid &= out[column] != ""
     out = out[valid]
 
-    out = out.drop_duplicates(subset=["phone"], keep="first")
+    if PHONE_COLUMN:
+        out = out.drop_duplicates(subset=[PHONE_COLUMN], keep="first")
 
     for column, max_len in MAX_LENGTHS.items():
         if column in out.columns:
@@ -124,7 +125,7 @@ def process_csv(decrypted_data: str) -> ProcessResult:
         records_valid=len(records),
         records_skipped=skipped,
         source_columns=list(df.columns),
-        target_columns=list(COLUMN_MAPPING.values()),
+        target_columns=list(records[0].keys()),
     )
 
 
