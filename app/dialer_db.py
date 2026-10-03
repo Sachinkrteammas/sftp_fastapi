@@ -14,6 +14,7 @@ from mysql.connector import errorcode
 
 from .config import get_settings
 from .logger import get_logger
+from .models import SbiRecord
 
 log = get_logger("dialer_db")
 
@@ -106,26 +107,25 @@ def check_already_processed(file_hash: str) -> bool:
 
 
 def insert_records(records: list[dict[str, Any]], *, file_name: str, file_hash: str) -> int:
-    """Insert all records AND the SUCCESS history row in ONE transaction.
+    """Save all records (SbiRecord model) AND the SUCCESS history row in ONE transaction.
 
     Either everything is committed, or everything is rolled back, so a file
     can never be marked SUCCESS without its rows (and vice versa).
+    The target table is created first if it does not exist.
     """
     if not records:
         return 0
     settings = get_settings()
     target = _quote(settings.dialer_target_table)
     history = _quote(settings.history_table)
-    columns = list(records[0].keys())
-    column_sql = ", ".join(_quote(c) for c in columns)
-    placeholders = ", ".join(["%s"] * len(columns))
-    insert_sql = f"INSERT INTO {target} ({column_sql}) VALUES ({placeholders})"
 
     conn = connect_db()
     cursor = None
     inserted = 0
     try:
         cursor = conn.cursor()
+        # DDL commits implicitly in MySQL, so create the table before the transaction
+        SbiRecord.create_table(cursor, target)
         conn.start_transaction()
 
         # Lock this hash's history row (or its gap) so a parallel run cannot also insert
@@ -134,10 +134,8 @@ def insert_records(records: list[dict[str, Any]], *, file_name: str, file_hash: 
         if row and row[0] == "SUCCESS":
             raise DuplicateFileError("File already processed")
 
-        for start in range(0, len(records), BATCH_SIZE):
-            batch = [tuple(r[c] for c in columns) for r in records[start:start + BATCH_SIZE]]
-            cursor.executemany(insert_sql, batch)
-            inserted += max(cursor.rowcount, 0)
+        inserted = SbiRecord.save_all(cursor, target, records, source_file=file_name,
+                                      batch_size=BATCH_SIZE)
 
         cursor.execute(
             f"""INSERT INTO {history}
@@ -163,7 +161,7 @@ def insert_records(records: list[dict[str, Any]], *, file_name: str, file_hash: 
         if exc.errno == errorcode.ER_NO_SUCH_TABLE:
             raise DatabaseInsertError("Dialer target table or history table does not exist") from exc
         if exc.errno == errorcode.ER_BAD_FIELD_ERROR:
-            raise DatabaseInsertError("Dialer target table is missing a mapped column") from exc
+            raise DatabaseInsertError("Dialer target table is missing a column of the SbiRecord model") from exc
         raise DatabaseInsertError("Database insert failed; all changes were rolled back") from exc
     except Exception:
         conn.rollback()

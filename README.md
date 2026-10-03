@@ -223,40 +223,28 @@ CREATE TABLE IF NOT EXISTS sftp_file_history (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-Example target table (use your real Dialer table instead):
-
-```sql
-CREATE TABLE IF NOT EXISTS customer_leads (
-    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    phone      VARCHAR(20)  NOT NULL,
-    name       VARCHAR(100) NOT NULL,
-    city       VARCHAR(100) NULL,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+The target table (`DIALER_TARGET_TABLE`, e.g. `sbi_records`) is also created
+automatically from the `SbiRecord` model in `app/models.py`: one `VARCHAR(255)`
+column per SBI header (exact names, values stored exactly as in the file),
+plus `id`, `source_file` (the file each row came from) and `created_at`.
+To add a column SBI starts sending, add it to `SbiRecord.COLUMNS` and run
+`ALTER TABLE sbi_records ADD COLUMN new_col VARCHAR(255) NULL;`
+(columns not in the model are skipped with a warning).
 
 Least-privilege DB user:
 
 ```sql
 CREATE USER 'dialer_import'@'%' IDENTIFIED BY 'strong-password';
 GRANT SELECT, INSERT, UPDATE, CREATE ON dialer.sftp_file_history TO 'dialer_import'@'%';
-GRANT INSERT ON dialer.customer_leads TO 'dialer_import'@'%';
+GRANT INSERT, CREATE ON dialer.sbi_records TO 'dialer_import'@'%';
 ```
 
-### Changing the CSV → table mapping
+### CSV rules
 
-Edit the top of `app/processor.py`:
-
-```python
-COLUMN_MAPPING = {"phone": "phone", "name": "name", "city": "city"}  # CSV column -> table column
-REQUIRED_SOURCE_COLUMNS = ("phone", "name")
-REQUIRED_VALUES = ("phone", "name")
-MAX_LENGTHS = {"phone": 20, "name": 100, "city": 100}
-```
-
-Validation rules: header names are trimmed and lower-cased; phone keeps digits
-only and must be 7–15 digits; rows with empty required values are skipped;
-duplicate phones inside the file are skipped (first one kept).
+Set at the top of `app/processor.py`. `COLUMN_MAPPING = None` keeps every CSV
+column with its own (trimmed, lower-cased) header name; all rows are kept and
+values are only trimmed. The run stops if a column in
+`REQUIRED_SOURCE_COLUMNS` (default `account_no`) is missing.
 
 ---
 
