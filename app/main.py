@@ -7,7 +7,7 @@ import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
@@ -68,8 +68,8 @@ _last_run: dict[str, Any] | None = None
 async def lifespan(_: FastAPI):
     settings = get_settings()  # fails fast with a clear message if .env is incomplete
     setup_logging(settings.log_level, settings.log_file)
-    log.info("Service started | mode=%s | remote file=%s",
-             settings.process_mode, settings.sftp_remote_file)
+    log.info("Service started | mode=%s | remote file=%s (today: %s)",
+             settings.process_mode, settings.sftp_remote_file, settings.remote_file_for())
     if not settings.is_save_mode:
         log.warning("PREVIEW mode: decrypted data is printed to console, nothing is saved to DB")
     yield
@@ -101,9 +101,8 @@ def _error_response(exc: Exception, file_name: str | None) -> JSONResponse:
     return JSONResponse(status_code=code, content=body)
 
 
-def run_pipeline() -> dict[str, Any]:
+def run_pipeline(remote_path: str) -> dict[str, Any]:
     settings = get_settings()
-    remote_path = settings.sftp_remote_file
     file_name = posixpath.basename(remote_path)
     started = time.monotonic()
 
@@ -175,16 +174,18 @@ def health() -> Dict[str, str]:
 # Sync (def) endpoints run in FastAPI's thread pool, so blocking SFTP / GPG / MySQL
 # calls do not block the event loop.
 @app.post("/process-file", tags=["processing"], dependencies=[Depends(verify_api_key)])
-def process_file():
+def process_file(file_date: Optional[date] = Query(
+        None, description="Date for {date:...} in SFTP_REMOTE_FILE, e.g. 2026-10-03 (default: today)")):
     global _last_run
-    file_name = posixpath.basename(get_settings().sftp_remote_file)
+    remote_path = get_settings().remote_file_for(file_date)
+    file_name = posixpath.basename(remote_path)
 
     if not _process_lock.acquire(blocking=False):
         return _error_response(ProcessBusyError("Processing is already running, try again later"),
                                file_name)
     finished_at = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
     try:
-        result = run_pipeline()
+        result = run_pipeline(remote_path)
         _last_run = {**result, "finished_at": finished_at()}
         return result
     except KNOWN_ERRORS as exc:

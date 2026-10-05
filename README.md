@@ -91,7 +91,8 @@ nano .env
 | `SFTP_PRIVATE_KEY_PASSPHRASE` | no | Passphrase of that key, if it has one |
 | `SFTP_INTERACTIVE_RESPONSE` | no | Answer for the keyboard-interactive prompt the server may show after the password (default: `SFTP_PASSWORD`) |
 | `SFTP_LOGIN_ORDER` | no | Login order for key + password servers, e.g. `publickey,keyboard-interactive`. Empty = `publickey,keyboard-interactive,password`. One connection, one login attempt per run |
-| `SFTP_REMOTE_FILE` | yes | Full remote path, e.g. `/incoming/customer_data.csv.gpg` |
+| `SFTP_REMOTE_FILE` | yes | Full remote path. `{date:%d%m%Y}` is replaced by today's date, e.g. `/FROM_SBICMASCALL01/MAS_AHM_CD3_FAT_S_HB_TEST_{date:%d%m%Y}.csv.gpg`. `POST /process-file?file_date=2026-10-03` runs another day |
+| `SFTP_DATE_UTC_OFFSET` | no (+05:30) | Time zone for "today" in the file name (server clock is UTC) |
 | `SFTP_KNOWN_HOSTS` | no | known_hosts file used to verify the server (default `~/.ssh/known_hosts`) |
 | `SFTP_STRICT_HOST_KEY_CHECKING` | no (true) | `true` = refuse unknown/changed servers. Keep `true` in production |
 | `SFTP_TIMEOUT_SECONDS` | no (30) | Connect/handshake/auth timeout |

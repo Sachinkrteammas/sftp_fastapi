@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -17,6 +18,9 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# {date:%d%m%Y} in SFTP_REMOTE_FILE -> the run date in that strftime format
+_DATE_TOKEN = re.compile(r"\{date:([^}]+)\}")
+_UTC_OFFSET = re.compile(r"^([+-])(\d{2}):(\d{2})$")
 VALID_MODES = ("preview", "save")
 _LOGIN_METHODS = ("publickey", "password", "keyboard-interactive")
 
@@ -62,6 +66,7 @@ class Settings:
     sftp_strict_host_key_checking: bool
     sftp_timeout_seconds: int
     sftp_max_file_mb: int
+    sftp_date_utc_offset: str
     # GPG
     gpg_passphrase: str = field(repr=False)
     gpg_home: str
@@ -89,6 +94,18 @@ class Settings:
     def db_configured(self) -> bool:
         return all((self.dialer_db_host, self.dialer_db_user,
                     self.dialer_db_name, self.dialer_target_table))
+
+    def today(self) -> date:
+        """Today's date in SFTP_DATE_UTC_OFFSET (default India, +05:30); the server clock is UTC."""
+        sign, hours, minutes = _UTC_OFFSET.match(self.sftp_date_utc_offset).groups()
+        offset = timedelta(hours=int(hours), minutes=int(minutes))
+        tz = timezone(offset if sign == "+" else -offset)
+        return datetime.now(tz).date()
+
+    def remote_file_for(self, day: date | None = None) -> str:
+        """SFTP_REMOTE_FILE with every {date:FORMAT} replaced by `day` (default: today)."""
+        day = day or self.today()
+        return _DATE_TOKEN.sub(lambda m: day.strftime(m.group(1)), self.sftp_remote_file)
 
 
 def _validate(s: Settings) -> None:
@@ -127,6 +144,10 @@ def _validate(s: Settings) -> None:
     bad = [m for m in s.sftp_login_order if m not in _LOGIN_METHODS]
     if bad:
         raise ConfigError(f"SFTP_LOGIN_ORDER may only contain: {', '.join(_LOGIN_METHODS)}")
+    if not _UTC_OFFSET.match(s.sftp_date_utc_offset):
+        raise ConfigError("SFTP_DATE_UTC_OFFSET must look like +05:30")
+    if "{" in _DATE_TOKEN.sub("", s.sftp_remote_file):
+        raise ConfigError("SFTP_REMOTE_FILE: use the date placeholder as {date:%d%m%Y}")
     if s.sftp_max_file_mb <= 0:
         raise ConfigError("SFTP_MAX_FILE_MB must be greater than 0")
 
@@ -147,6 +168,7 @@ def get_settings() -> Settings:
         sftp_strict_host_key_checking=_bool("SFTP_STRICT_HOST_KEY_CHECKING", True),
         sftp_timeout_seconds=_int("SFTP_TIMEOUT_SECONDS", 30),
         sftp_max_file_mb=_int("SFTP_MAX_FILE_MB", 200),
+        sftp_date_utc_offset=_str("SFTP_DATE_UTC_OFFSET", "+05:30"),
         gpg_passphrase=os.getenv("GPG_PASSPHRASE", ""),
         gpg_home=_str("GPG_HOME"),
         file_encoding=_str("FILE_ENCODING", "utf-8-sig"),
