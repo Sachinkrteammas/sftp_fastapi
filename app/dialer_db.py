@@ -14,6 +14,7 @@ from mysql.connector import errorcode
 
 from .config import get_settings
 from .logger import get_logger
+from . import vicidial_db
 from .models import SbiRecord
 
 log = get_logger("dialer_db")
@@ -106,15 +107,19 @@ def check_already_processed(file_hash: str) -> bool:
         conn.close()
 
 
-def insert_records(records: list[dict[str, Any]], *, file_name: str, file_hash: str) -> int:
-    """Save all records (SbiRecord model) AND the SUCCESS history row in ONE transaction.
+def insert_records(records: list[dict[str, Any]], *, file_name: str,
+                   file_hash: str) -> tuple[int, int]:
+    """Save all records (SbiRecord model) AND the SUCCESS history row in ONE transaction,
+    and, if VICIDIAL_DB_HOST is set, one dialer lead per record in vicidial_list.
 
-    Either everything is committed, or everything is rolled back, so a file
-    can never be marked SUCCESS without its rows (and vice versa).
+    Order: SBI rows + history (not committed) -> VICIdial leads (committed) -> commit.
+    If VICIdial fails, the SBI transaction is rolled back too, so the file is not
+    marked SUCCESS and can simply be processed again.
     The target table is created first if it does not exist.
+    Returns (records inserted, VICIdial leads inserted).
     """
     if not records:
-        return 0
+        return 0, 0
     settings = get_settings()
     target = _quote(settings.dialer_target_table)
     history = _quote(settings.history_table)
@@ -149,9 +154,20 @@ def insert_records(records: list[dict[str, Any]], *, file_name: str, file_hash: 
                     status = 'SUCCESS'""",
             (file_name, file_hash, inserted),
         )
-        conn.commit()
+
+        leads = 0
+        if settings.vicidial_enabled:
+            leads = _insert_vicidial_leads(records)
+        try:
+            conn.commit()
+        except mysql.connector.Error:
+            if leads:
+                log.critical("VICIdial leads were committed but saving %s failed: check "
+                             "list_id %s before processing this file again",
+                             settings.dialer_target_table, settings.vicidial_list_id)
+            raise
         log.info("Number of records inserted: %s (transaction committed)", inserted)
-        return inserted
+        return inserted, leads
     except DuplicateFileError:
         conn.rollback()
         raise
@@ -170,6 +186,20 @@ def insert_records(records: list[dict[str, Any]], *, file_name: str, file_hash: 
         if cursor is not None:
             cursor.close()
         conn.close()
+
+
+def _insert_vicidial_leads(records: list[dict[str, Any]]) -> int:
+    """Insert + commit the leads in the VICIdial DB; errors become this module's DB errors."""
+    try:
+        vici = vicidial_db.connect()
+    except vicidial_db.VicidialConnectionError as exc:
+        raise DatabaseConnectionError(str(exc)) from exc
+    try:
+        return vicidial_db.insert_leads(vici, records, batch_size=BATCH_SIZE)
+    except vicidial_db.VicidialInsertError as exc:
+        raise DatabaseInsertError(str(exc)) from exc
+    finally:
+        vici.close()
 
 
 def mark_failed(*, file_name: str, file_hash: str, error_message: str) -> None:

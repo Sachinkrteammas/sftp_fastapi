@@ -79,12 +79,26 @@ class Settings:
     dialer_db_name: str
     dialer_target_table: str
     history_table: str
+    # VICIdial DB (second database): every saved SBI record also becomes a dialer lead
+    vicidial_db_host: str
+    vicidial_db_port: int
+    vicidial_db_user: str
+    vicidial_db_password: str = field(repr=False)
+    vicidial_db_name: str
+    vicidial_table: str
+    vicidial_list_id: int
+    vicidial_phone_code: str
+    vicidial_gmt_offset: str
     # App
     process_mode: str
     preview_rows: int
     api_key: str = field(repr=False)
     log_level: str
     log_file: str
+
+    @property
+    def vicidial_enabled(self) -> bool:
+        return bool(self.vicidial_db_host)
 
     @property
     def is_save_mode(self) -> bool:
@@ -127,13 +141,19 @@ def _validate(s: Settings) -> None:
             ("DIALER_DB_NAME", s.dialer_db_name),
             ("DIALER_TARGET_TABLE", s.dialer_target_table),
         ) if not value]
+        if s.vicidial_enabled:
+            missing += [name for name, value in (
+                ("VICIDIAL_DB_USER", s.vicidial_db_user),
+                ("VICIDIAL_DB_NAME", s.vicidial_db_name),
+            ) if not value]
 
     if missing:
         # Only variable NAMES are reported, never values.
         raise ConfigError(f"Missing required settings: {', '.join(missing)}")
 
     for name, value in (("DIALER_TARGET_TABLE", s.dialer_target_table),
-                        ("HISTORY_TABLE", s.history_table)):
+                        ("HISTORY_TABLE", s.history_table),
+                        ("VICIDIAL_TABLE", s.vicidial_table)):
         if value and not _IDENTIFIER.match(value):
             raise ConfigError(f"{name} may only contain letters, digits and underscore")
 
@@ -179,6 +199,15 @@ def get_settings() -> Settings:
         dialer_db_name=_str("DIALER_DB_NAME"),
         dialer_target_table=_str("DIALER_TARGET_TABLE"),
         history_table=_str("HISTORY_TABLE", "sftp_file_history"),
+        vicidial_db_host=_str("VICIDIAL_DB_HOST"),
+        vicidial_db_port=_int("VICIDIAL_DB_PORT", 3306),
+        vicidial_db_user=_str("VICIDIAL_DB_USER"),
+        vicidial_db_password=os.getenv("VICIDIAL_DB_PASSWORD", ""),
+        vicidial_db_name=_str("VICIDIAL_DB_NAME"),
+        vicidial_table=_str("VICIDIAL_TABLE", "vicidial_list"),
+        vicidial_list_id=_int("VICIDIAL_LIST_ID", 5001),
+        vicidial_phone_code=_str("VICIDIAL_PHONE_CODE", "1"),
+        vicidial_gmt_offset=_str("VICIDIAL_GMT_OFFSET", "5.50"),
         process_mode=_str("PROCESS_MODE", "preview").lower(),
         preview_rows=_int("PREVIEW_ROWS", 20),
         api_key=os.getenv("API_KEY", ""),

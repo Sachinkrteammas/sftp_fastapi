@@ -146,13 +146,14 @@ def run_pipeline(remote_path: str) -> dict[str, Any]:
         del decrypted_data
 
         # 9-11. Insert into Dialer DB + history SUCCESS in one transaction
-        inserted = dialer_db.insert_records(result.records, file_name=file_name, file_hash=file_hash)
+        inserted, leads = dialer_db.insert_records(result.records, file_name=file_name,
+                                                   file_hash=file_hash)
     except HISTORY_FAILURES as exc:
         if settings.is_save_mode:
             dialer_db.mark_failed(file_name=file_name, file_hash=file_hash, error_message=str(exc))
         raise
 
-    log.info("Processing completed: %s records inserted", inserted)
+    log.info("Processing completed: %s records inserted, %s VICIdial leads", inserted, leads)
     return {
         "status": "success",
         "mode": "save",
@@ -162,6 +163,8 @@ def run_pipeline(remote_path: str) -> dict[str, Any]:
         "records_valid": result.records_valid,
         "records_skipped": result.records_skipped,
         "records_inserted": inserted,
+        "vicidial_leads_inserted": leads,
+        "vicidial_list_id": settings.vicidial_list_id if settings.vicidial_enabled else None,
         "seconds": round(time.monotonic() - started, 2),
     }
 

@@ -240,6 +240,18 @@ GRANT SELECT, INSERT, UPDATE, CREATE ON dialer.sftp_file_history TO 'dialer_impo
 GRANT INSERT, CREATE ON dialer.sbi_records TO 'dialer_import'@'%';
 ```
 
+### VICIdial leads (optional second database)
+
+Set `VICIDIAL_DB_HOST` (+ user, password, `VICIDIAL_DB_NAME`) to also insert one
+lead per record into `VICIDIAL_TABLE` (default `vicidial_list`). Column mapping
+is `LEAD_MAPPING` in `app/vicidial_db.py`; fixed values: `list_id`
+(`VICIDIAL_LIST_ID`), `status='NEW'`, `called_since_last_reset='N'`,
+`phone_code`, `gmt_offset_now`, `entry_date=NOW()`. Values longer than a
+vicidial_list column are cut to fit (logged). The leads are committed first, then
+the SBI rows and history; if VICIdial fails nothing is saved and the file can be
+processed again. The VICIdial user needs `SELECT` on `information_schema` (default)
+and `INSERT` on the table.
+
 ### CSV rules
 
 Set at the top of `app/processor.py`. `COLUMN_MAPPING = None` keeps every CSV
