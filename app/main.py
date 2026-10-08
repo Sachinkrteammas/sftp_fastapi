@@ -11,9 +11,9 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from . import dialer_db
+from . import dialer_db, report_service
 from .config import ConfigError, get_settings
 from .decrypt_service import (DecodingError, DecryptionError, GpgNotAvailableError,
                               InvalidEncryptedFileError, decrypt_data)
@@ -52,6 +52,7 @@ ERROR_STATUS: list[tuple[type[Exception], int]] = [
     (DatabaseNotConfiguredError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (GpgNotAvailableError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (ConfigError, status.HTTP_500_INTERNAL_SERVER_ERROR),
+    (report_service.ReportNotFoundError, status.HTTP_404_NOT_FOUND),
 ]
 KNOWN_ERRORS = tuple(exc for exc, _ in ERROR_STATUS)
 
@@ -215,6 +216,27 @@ def last_status() -> Dict[str, Any]:
         "running": _process_lock.locked(),
         "last_run": _last_run,
     }
+
+
+@app.get("/report", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report(
+        file_date: Optional[date] = Query(
+            None, description="Date of the SBI file ({date:...} in SFTP_REMOTE_FILE), default today"),
+        list_id: Optional[int] = Query(
+            None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001")):
+    """Disposition CSV: the SBI columns of that day's file + DIAL_CNT and the latest calls."""
+    settings = get_settings()
+    source_file = posixpath.basename(settings.remote_file_for(file_date))
+    try:
+        if not settings.vicidial_enabled:
+            raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
+        result = report_service.disposition_report(source_file, list_id or settings.report_list_id)
+    except KNOWN_ERRORS as exc:
+        log.error("Report failed: %s: %s", type(exc).__name__, exc)
+        return _error_response(exc, source_file)
+    name = source_file.replace(".csv.gpg", "").replace(".gpg", "") + "_disposition.csv"
+    return Response(content=result["csv"], media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.get("/history", tags=["monitoring"], dependencies=[Depends(verify_api_key)])

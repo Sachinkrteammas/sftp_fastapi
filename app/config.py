@@ -89,6 +89,8 @@ class Settings:
     vicidial_list_id: int
     vicidial_phone_code: str
     vicidial_gmt_offset: str
+    report_list_id: int
+    report_max_calls: int
     # App
     process_mode: str
     preview_rows: int
@@ -168,6 +170,8 @@ def _validate(s: Settings) -> None:
         raise ConfigError("SFTP_DATE_UTC_OFFSET must look like +05:30")
     if "{" in _DATE_TOKEN.sub("", s.sftp_remote_file):
         raise ConfigError("SFTP_REMOTE_FILE: use the date placeholder as {date:%d%m%Y}")
+    if not 1 <= s.report_max_calls <= 6:
+        raise ConfigError("REPORT_MAX_CALLS must be between 1 and 6 (SBI's report has 6 call slots)")
     if s.sftp_max_file_mb <= 0:
         raise ConfigError("SFTP_MAX_FILE_MB must be greater than 0")
 
@@ -208,6 +212,9 @@ def get_settings() -> Settings:
         vicidial_list_id=_int("VICIDIAL_LIST_ID", 5001),
         vicidial_phone_code=_str("VICIDIAL_PHONE_CODE", "1"),
         vicidial_gmt_offset=_str("VICIDIAL_GMT_OFFSET", "5.50"),
+        # Report: list to read call results from (default: the list leads are saved to)
+        report_list_id=_int("REPORT_LIST_ID", _int("VICIDIAL_LIST_ID", 5001)),
+        report_max_calls=_int("REPORT_MAX_CALLS", 6),
         process_mode=_str("PROCESS_MODE", "preview").lower(),
         preview_rows=_int("PREVIEW_ROWS", 20),
         api_key=os.getenv("API_KEY", ""),
