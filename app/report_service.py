@@ -181,13 +181,12 @@ def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: i
                for header, column in zip(SBI_HEADERS, SbiRecord.COLUMNS)}
         row["RECORD_NUM"] = str(number)
         leads = leads_by_account.get(str(record.get("account_no") or ""), [])
-        tz_by_lead = {lead["lead_id"]: _text(lead["gmt_offset_now"]) for lead in leads}
 
         # An account loaded more than once has several leads: merge their calls
         calls = sorted((c for lead in leads for c in calls_by_lead.get(lead["lead_id"], [])),
                        key=lambda c: c["call_dt"] or datetime.min, reverse=True)
-        row["AC"] = ""
-        row["TZ"] = tz_by_lead[leads[0]["lead_id"]] if leads else ""
+        row["AC"] = row["ACCOUNT_NO"]          # account number
+        row["TZ"] = row["TIME_ZONE"]           # time zone as SBI sent it (e.g. IND)
         row["DIAL_CNT"] = str(len(calls))
         for n, call in enumerate(calls[:max_calls], 1):
             row[f"CALL{n}_PHONE"] = _text(call["call_phone"])
@@ -196,7 +195,7 @@ def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: i
             row[f"DISP{n}_C"] = _text(call["disp_code"])
             row[f"DISPOSITION{n}_DESC"] = _text(call["disp_desc"])
             row[f"AGENT{n}_ID"] = _text(call["agent_id"])
-            row[f"PHONE{n}TZ"] = tz_by_lead.get(call["lead_id"], "")
+            row[f"PHONE{n}TZ"] = row["TZ"]
 
         callback = [(callback_by_lead[lead["lead_id"]], lead) for lead in leads
                     if lead["lead_id"] in callback_by_lead]
