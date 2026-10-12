@@ -185,7 +185,7 @@ def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: i
         # An account loaded more than once has several leads: merge their calls
         calls = sorted((c for lead in leads for c in calls_by_lead.get(lead["lead_id"], [])),
                        key=lambda c: c["call_dt"] or datetime.min, reverse=True)
-        row["AC"] = row["ACCOUNT_NO"]          # account number
+        row["AC"] = ""                         # left blank
         row["TZ"] = row["TIME_ZONE"]           # time zone as SBI sent it (e.g. IND)
         row["DIAL_CNT"] = str(len(calls))
         for n, call in enumerate(calls[:max_calls], 1):
