@@ -219,8 +219,27 @@ def to_csv(rows: List[Dict[str, str]]) -> str:
     return out.getvalue()
 
 
+def _txt_value(value: str) -> str:
+    """A '|' or line break inside a value would break SBI's columns: replace with a space."""
+    return value.replace("|", " ").replace("\r", " ").replace("\n", " ")
+
+
+def to_txt(rows: List[Dict[str, str]], line_ending: str = "\n") -> str:
+    """Pipe-separated text: header line, then one line per record, same columns as the CSV."""
+    lines = ["|".join(REPORT_HEADERS)]
+    lines += ["|".join(_txt_value(row[h]) for h in REPORT_HEADERS) for row in rows]
+    return line_ending.join(lines) + line_ending
+
+
+def render(rows: List[Dict[str, str]], fmt: str) -> str:
+    """fmt 'txt' (pipe-separated, REPORT_LINE_ENDING) or 'csv'."""
+    if fmt == "csv":
+        return to_csv(rows)
+    return to_txt(rows, "\r\n" if get_settings().report_line_ending == "CRLF" else "\n")
+
+
 def disposition_report(source_file: str, list_id: int) -> Dict[str, Any]:
-    """Build the report for one SBI file. Returns csv text + counts for logging."""
+    """Build the report rows for one SBI file. Returns rows + counts for logging."""
     s = get_settings()
     records = load_sbi_records(source_file)
     if not records:
@@ -231,5 +250,5 @@ def disposition_report(source_file: str, list_id: int) -> Dict[str, Any]:
     called = sum(1 for r in rows if r["DIAL_CNT"] != "0")
     log.info("Report %s (list %s): %s accounts, %s matched leads, %s called, %s calls",
              source_file, list_id, len(rows), len(vici["leads"]), called, len(vici["calls"]))
-    return {"csv": to_csv(rows), "accounts": len(rows), "leads": len(vici["leads"]),
+    return {"rows": rows, "accounts": len(rows), "leads": len(vici["leads"]),
             "called": called, "calls": len(vici["calls"])}

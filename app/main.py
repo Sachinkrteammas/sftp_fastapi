@@ -15,15 +15,17 @@ from fastapi.responses import JSONResponse, Response
 
 from . import dialer_db, report_service
 from .config import ConfigError, get_settings
-from .decrypt_service import (DecodingError, DecryptionError, GpgNotAvailableError,
-                              InvalidEncryptedFileError, decrypt_data)
+from .decrypt_service import (DecodingError, DecryptionError, EncryptionError,
+                              GpgNotAvailableError, InvalidEncryptedFileError, decrypt_data,
+                              encrypt_data)
 from .dialer_db import (DatabaseConnectionError, DatabaseInsertError,
                         DatabaseNotConfiguredError, DuplicateFileError)
 from .logger import get_logger, setup_logging
 from .processor import (InvalidCSVError, MissingColumnsError, NoValidRecordsError,
                         print_preview, process_csv)
-from .sftp_service import (RemoteFileNotFoundError, RemoteFileReadError, SftpAuthError,
-                           SftpConnectionError, read_remote_file)
+from .sftp_service import (RemoteFileExistsError, RemoteFileNotFoundError, RemoteFileReadError,
+                           RemoteFileWriteError, SftpAuthError, SftpConnectionError,
+                           read_remote_file, upload_file)
 
 log = get_logger("main")
 
@@ -53,6 +55,9 @@ ERROR_STATUS: list[tuple[type[Exception], int]] = [
     (GpgNotAvailableError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (ConfigError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (report_service.ReportNotFoundError, status.HTTP_404_NOT_FOUND),
+    (RemoteFileExistsError, status.HTTP_409_CONFLICT),
+    (RemoteFileWriteError, status.HTTP_502_BAD_GATEWAY),
+    (EncryptionError, status.HTTP_500_INTERNAL_SERVER_ERROR),
 ]
 KNOWN_ERRORS = tuple(exc for exc, _ in ERROR_STATUS)
 
@@ -62,6 +67,7 @@ HISTORY_FAILURES = (InvalidEncryptedFileError, DecryptionError, DecodingError,
                     DatabaseInsertError, DatabaseConnectionError, GpgNotAvailableError)
 
 _process_lock = threading.Lock()
+_send_lock = threading.Lock()  # one report upload at a time
 _last_run: dict[str, Any] | None = None
 
 
@@ -223,9 +229,12 @@ def report(
         file_date: Optional[date] = Query(
             None, description="Date of the SBI file ({date:...} in SFTP_REMOTE_FILE), default today"),
         list_id: Optional[int] = Query(
-            None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001")):
-    """Disposition CSV: the SBI columns of that day's file + DIAL_CNT and the latest calls."""
+            None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001"),
+        format: Optional[str] = Query(
+            None, pattern="^(txt|csv)$", description="txt (pipe-separated) or csv, default REPORT_FORMAT")):
+    """Download the disposition report (not encrypted) to check it before sending."""
     settings = get_settings()
+    fmt = format or settings.report_format
     source_file = posixpath.basename(settings.remote_file_for(file_date))
     try:
         if not settings.vicidial_enabled:
@@ -234,9 +243,56 @@ def report(
     except KNOWN_ERRORS as exc:
         log.error("Report failed: %s: %s", type(exc).__name__, exc)
         return _error_response(exc, source_file)
-    name = source_file.replace(".csv.gpg", "").replace(".gpg", "") + "_disposition.csv"
-    return Response(content=result["csv"], media_type="text/csv",
+    name = settings.report_file_for(file_date)
+    name = name[:-4] if name.endswith(".gpg") else name
+    if not name.endswith("." + fmt):
+        name = name.rsplit(".", 1)[0] + "." + fmt
+    return Response(content=report_service.render(result["rows"], fmt),
+                    media_type="text/csv" if fmt == "csv" else "text/plain",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.post("/report/send", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report_send(
+        file_date: Optional[date] = Query(
+            None, description="Date of the SBI file, default today"),
+        list_id: Optional[int] = Query(
+            None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001"),
+        overwrite: bool = Query(
+            False, description="Replace the report if it was already uploaded")):
+    """Build the report (REPORT_FORMAT), encrypt it with SBI's public key and upload it to SBI."""
+    settings = get_settings()
+    source_file = posixpath.basename(settings.remote_file_for(file_date))
+    remote_path = posixpath.join(settings.report_upload_dir, settings.report_file_for(file_date))
+    if not _send_lock.acquire(blocking=False):
+        return _error_response(ProcessBusyError("A report upload is already running, try again later"),
+                               source_file)
+    started = time.monotonic()
+    try:
+        if not settings.vicidial_enabled:
+            raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
+        result = report_service.disposition_report(source_file, list_id or settings.report_list_id)
+        text = report_service.render(result["rows"], settings.report_format)
+        encrypted = encrypt_data(text.encode("utf-8"), settings.report_gpg_recipient)
+        del text  # plain report data only lived in memory
+        size = upload_file(remote_path, encrypted, overwrite=overwrite)
+    except KNOWN_ERRORS as exc:
+        log.error("Report send failed: %s: %s", type(exc).__name__, exc)
+        return _error_response(exc, source_file)
+    finally:
+        _send_lock.release()
+    log.info("Report sent: %s (%s accounts, %s called)", remote_path, result["accounts"], result["called"])
+    return {
+        "status": "success",
+        "source_file": source_file,
+        "uploaded_to": remote_path,
+        "format": settings.report_format,
+        "bytes": size,
+        "accounts": result["accounts"],
+        "called": result["called"],
+        "calls": result["calls"],
+        "seconds": round(time.monotonic() - started, 2),
+    }
 
 
 @app.get("/history", tags=["monitoring"], dependencies=[Depends(verify_api_key)])

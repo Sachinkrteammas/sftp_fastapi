@@ -28,6 +28,10 @@ class InvalidEncryptedFileError(Exception):
     """The bytes are not GPG/PGP encrypted data."""
 
 
+class EncryptionError(Exception):
+    """Could not encrypt for the recipient (public key missing, expired or not trusted)."""
+
+
 class DecodingError(Exception):
     """Decrypted bytes are not valid text in FILE_ENCODING."""
 
@@ -109,3 +113,19 @@ def decrypt_data(encrypted_data: bytes) -> str:
 
     log.info("Decryption successful (%s decrypted bytes)", len(result.data))
     return text
+
+
+def encrypt_data(data: bytes, recipient: str) -> bytes:
+    """Encrypt bytes in memory for `recipient` (a public key in the keyring); binary .gpg output."""
+    if not recipient:
+        raise EncryptionError("REPORT_GPG_RECIPIENT is not set (SBI's public key ID or fingerprint)")
+    gpg = _get_gpg()
+    # always_trust: the key was imported on purpose by the admin; GPG would otherwise refuse
+    # a key that has no trust signature
+    result = gpg.encrypt(data, [recipient], always_trust=True, armor=False)
+    if not result.ok:
+        log.error("Encryption failed (gpg status: %s)", result.status)
+        raise EncryptionError(f"Encryption failed for recipient {recipient!r} (gpg status: "
+                              f"{result.status}). Import SBI's public key: gpg --import <file>")
+    log.info("Encrypted %s bytes for %s -> %s bytes", len(data), recipient, len(result.data))
+    return result.data

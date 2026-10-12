@@ -5,7 +5,9 @@ into memory. sftp.get() is never used, so no local copy is created.
 """
 from __future__ import annotations
 
+import io
 import os
+import posixpath
 import socket
 import threading
 
@@ -29,6 +31,14 @@ class SftpConnectionError(Exception):
 
 class RemoteFileNotFoundError(Exception):
     """The configured remote file does not exist."""
+
+
+class RemoteFileExistsError(Exception):
+    """The file to upload already exists on the server (use overwrite to replace it)."""
+
+
+class RemoteFileWriteError(Exception):
+    """Upload failed (folder missing, no write permission, connection lost)."""
 
 
 class RemoteFileReadError(Exception):
@@ -323,3 +333,56 @@ def read_remote_file(remote_path: str | None = None) -> bytes:
                 except Exception:  # cleanup must never hide the real error
                     log.debug("Error while closing %s", name)
         log.info("SFTP resources closed")
+
+
+def _exists(sftp: paramiko.SFTPClient, path: str) -> bool:
+    try:
+        sftp.stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def upload_file(remote_path: str, data: bytes, *, overwrite: bool = False) -> int:
+    """Upload bytes from memory to remote_path (no local file). Returns the uploaded size.
+
+    With SFTP_UPLOAD_ATOMIC (default) the data goes to '<name>.part' first and is renamed
+    when complete, so the receiver never picks up a half-written file.
+    """
+    settings = get_settings()
+    part_path = remote_path + ".part"
+    transport: paramiko.Transport | None = None
+    sftp: paramiko.SFTPClient | None = None
+    try:
+        transport, sftp = connect_sftp()
+        try:
+            if _exists(sftp, remote_path):
+                if not overwrite:
+                    raise RemoteFileExistsError(f"Remote file already exists: {remote_path}")
+                sftp.remove(remote_path)
+                log.warning("Existing remote file removed (overwrite): %s", remote_path)
+
+            target = part_path if settings.sftp_upload_atomic else remote_path
+            sftp.putfo(io.BytesIO(data), target, file_size=len(data), confirm=True)
+            if settings.sftp_upload_atomic:
+                sftp.rename(part_path, remote_path)
+        except RemoteFileExistsError:
+            raise
+        except FileNotFoundError as exc:
+            raise RemoteFileWriteError(
+                f"Remote folder not found: {posixpath.dirname(remote_path)}") from exc
+        except PermissionError as exc:
+            raise RemoteFileWriteError(
+                f"Permission denied writing {remote_path} (if renaming is not allowed, "
+                "set SFTP_UPLOAD_ATOMIC=false)") from exc
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            raise RemoteFileWriteError(f"Upload failed: {remote_path}") from exc
+        log.info("Uploaded %s bytes to %s", len(data), remote_path)
+        return len(data)
+    finally:
+        for name, resource in (("sftp", sftp), ("transport", transport)):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:  # cleanup must never hide the real error
+                    log.debug("Error while closing %s", name)

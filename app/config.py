@@ -91,6 +91,12 @@ class Settings:
     vicidial_gmt_offset: str
     report_list_id: int
     report_max_calls: int
+    report_format: str
+    report_line_ending: str
+    report_upload_dir: str
+    report_file_name: str
+    report_gpg_recipient: str
+    sftp_upload_atomic: bool
     # App
     process_mode: str
     preview_rows: int
@@ -118,10 +124,25 @@ class Settings:
         tz = timezone(offset if sign == "+" else -offset)
         return datetime.now(tz).date()
 
+    def _with_date(self, template: str, day: date | None) -> str:
+        day = day or self.today()
+        return _DATE_TOKEN.sub(lambda m: day.strftime(m.group(1)), template)
+
     def remote_file_for(self, day: date | None = None) -> str:
         """SFTP_REMOTE_FILE with every {date:FORMAT} replaced by `day` (default: today)."""
-        day = day or self.today()
-        return _DATE_TOKEN.sub(lambda m: day.strftime(m.group(1)), self.sftp_remote_file)
+        return self._with_date(self.sftp_remote_file, day)
+
+    def report_file_for(self, day: date | None = None) -> str:
+        """Upload name of the encrypted report. Default: SBI file name + _disposition.<fmt>.gpg."""
+        template = self.report_file_name
+        if not template:
+            base = self.sftp_remote_file.rsplit("/", 1)[-1]
+            for suffix in (".csv.gpg", ".txt.gpg", ".gpg", ".pgp"):
+                if base.lower().endswith(suffix):
+                    base = base[: -len(suffix)]
+                    break
+            template = f"{base}_disposition.{self.report_format}.gpg"
+        return self._with_date(template, day)
 
 
 def _validate(s: Settings) -> None:
@@ -170,6 +191,13 @@ def _validate(s: Settings) -> None:
         raise ConfigError("SFTP_DATE_UTC_OFFSET must look like +05:30")
     if "{" in _DATE_TOKEN.sub("", s.sftp_remote_file):
         raise ConfigError("SFTP_REMOTE_FILE: use the date placeholder as {date:%d%m%Y}")
+    if s.report_format not in ("txt", "csv"):
+        raise ConfigError("REPORT_FORMAT must be txt or csv")
+    if s.report_line_ending not in ("LF", "CRLF"):
+        raise ConfigError("REPORT_LINE_ENDING must be LF or CRLF")
+    if "/" in s.report_file_name or "{" in _DATE_TOKEN.sub("", s.report_file_name):
+        raise ConfigError("REPORT_FILE_NAME must be a file name (folder goes in REPORT_UPLOAD_DIR); "
+                          "date placeholder as {date:%d%m%Y}")
     if not 1 <= s.report_max_calls <= 6:
         raise ConfigError("REPORT_MAX_CALLS must be between 1 and 6 (SBI's report has 6 call slots)")
     if s.sftp_max_file_mb <= 0:
@@ -215,6 +243,12 @@ def get_settings() -> Settings:
         # Report: list to read call results from (default: the list leads are saved to)
         report_list_id=_int("REPORT_LIST_ID", _int("VICIDIAL_LIST_ID", 5001)),
         report_max_calls=_int("REPORT_MAX_CALLS", 6),
+        report_format=_str("REPORT_FORMAT", "txt").lower(),
+        report_line_ending=_str("REPORT_LINE_ENDING", "LF").upper(),
+        report_upload_dir=_str("REPORT_UPLOAD_DIR", "/TO_SBICMASCALL01").rstrip("/") or "/",
+        report_file_name=_str("REPORT_FILE_NAME"),
+        report_gpg_recipient=_str("REPORT_GPG_RECIPIENT"),
+        sftp_upload_atomic=_bool("SFTP_UPLOAD_ATOMIC", True),
         process_mode=_str("PROCESS_MODE", "preview").lower(),
         preview_rows=_int("PREVIEW_ROWS", 20),
         api_key=os.getenv("API_KEY", ""),
