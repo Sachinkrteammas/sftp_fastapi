@@ -252,3 +252,39 @@ def disposition_report(source_file: str, list_id: int) -> Dict[str, Any]:
              source_file, list_id, len(rows), len(vici["leads"]), called, len(vici["calls"]))
     return {"rows": rows, "accounts": len(rows), "leads": len(vici["leads"]),
             "called": called, "calls": len(vici["calls"])}
+
+
+def combined_report(day, feeds, list_override: int | None = None) -> Dict[str, Any]:
+    """One report for several feeds (e.g. FAT + NC): each feed's accounts are matched against
+    that feed's own VICIdial list, then all rows are joined and RECORD_NUM runs 1..N.
+
+    A feed whose file has no saved records is skipped (listed in "missing"); the report fails
+    only if no feed has records. list_override (e.g. 1001 for testing) replaces every feed's list.
+    """
+    s = get_settings()
+    rows: List[Dict[str, str]] = []
+    per_feed: Dict[str, Any] = {}
+    missing: List[str] = []
+    for feed in feeds:
+        source_file = s.feed_file_for(feed, day).rsplit("/", 1)[-1]
+        list_id = list_override or feed.report_list_id
+        try:
+            part = disposition_report(source_file, list_id)
+        except ReportNotFoundError:
+            log.warning("Report: no records for feed %s (%s), skipped", feed.name, source_file)
+            missing.append(feed.name)
+            per_feed[feed.name] = {"source_file": source_file, "list_id": list_id, "accounts": 0}
+            continue
+        rows += part["rows"]
+        per_feed[feed.name] = {"source_file": source_file, "list_id": list_id,
+                               "accounts": part["accounts"], "called": part["called"],
+                               "calls": part["calls"]}
+    if not rows:
+        raise ReportNotFoundError("No records saved for any feed on this date: "
+                                  + ", ".join(f"{n} ({v['source_file']})" for n, v in per_feed.items()))
+    for number, row in enumerate(rows, 1):
+        row["RECORD_NUM"] = str(number)
+    return {"rows": rows, "feeds": per_feed, "missing": missing,
+            "accounts": len(rows),
+            "called": sum(v.get("called", 0) for v in per_feed.values()),
+            "calls": sum(v.get("calls", 0) for v in per_feed.values())}

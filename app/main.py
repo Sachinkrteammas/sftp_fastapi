@@ -75,8 +75,10 @@ _last_run: dict[str, Any] | None = None
 async def lifespan(_: FastAPI):
     settings = get_settings()  # fails fast with a clear message if .env is incomplete
     setup_logging(settings.log_level, settings.log_file)
-    log.info("Service started | mode=%s | remote file=%s (today: %s)",
-             settings.process_mode, settings.sftp_remote_file, settings.remote_file_for())
+    log.info("Service started | mode=%s", settings.process_mode)
+    for feed in settings.feeds:
+        log.info("Feed %s | list %s | today: %s", feed.name, feed.list_id,
+                 settings.feed_file_for(feed))
     if not settings.is_save_mode:
         log.warning("PREVIEW mode: decrypted data is printed to console, nothing is saved to DB")
     yield
@@ -108,7 +110,7 @@ def _error_response(exc: Exception, file_name: str | None) -> JSONResponse:
     return JSONResponse(status_code=code, content=body)
 
 
-def run_pipeline(remote_path: str) -> dict[str, Any]:
+def run_pipeline(remote_path: str, list_id: int) -> dict[str, Any]:
     settings = get_settings()
     file_name = posixpath.basename(remote_path)
     started = time.monotonic()
@@ -154,7 +156,7 @@ def run_pipeline(remote_path: str) -> dict[str, Any]:
 
         # 9-11. Insert into Dialer DB + history SUCCESS in one transaction
         inserted, leads = dialer_db.insert_records(result.records, file_name=file_name,
-                                                   file_hash=file_hash)
+                                                   file_hash=file_hash, list_id=list_id)
     except HISTORY_FAILURES as exc:
         if settings.is_save_mode:
             dialer_db.mark_failed(file_name=file_name, file_hash=file_hash, error_message=str(exc))
@@ -171,7 +173,7 @@ def run_pipeline(remote_path: str) -> dict[str, Any]:
         "records_skipped": result.records_skipped,
         "records_inserted": inserted,
         "vicidial_leads_inserted": leads,
-        "vicidial_list_id": settings.vicidial_list_id if settings.vicidial_enabled else None,
+        "vicidial_list_id": list_id if settings.vicidial_enabled else None,
         "seconds": round(time.monotonic() - started, 2),
     }
 
@@ -183,35 +185,61 @@ def health() -> Dict[str, str]:
 
 # Sync (def) endpoints run in FastAPI's thread pool, so blocking SFTP / GPG / MySQL
 # calls do not block the event loop.
-@app.post("/process-file", tags=["processing"], dependencies=[Depends(verify_api_key)])
-def process_file(file_date: Optional[date] = Query(
-        None, description="Date for {date:...} in SFTP_REMOTE_FILE, e.g. 2026-10-03 (default: today)")):
-    global _last_run
-    remote_path = get_settings().remote_file_for(file_date)
+def _run_feed(feed, file_date: Optional[date]) -> tuple:
+    """Process one feed. Returns (result dict, error response or None)."""
+    settings = get_settings()
+    remote_path = settings.feed_file_for(feed, file_date)
     file_name = posixpath.basename(remote_path)
-
-    if not _process_lock.acquire(blocking=False):
-        return _error_response(ProcessBusyError("Processing is already running, try again later"),
-                               file_name)
-    finished_at = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
     try:
-        result = run_pipeline(remote_path)
-        _last_run = {**result, "finished_at": finished_at()}
-        return result
+        return {"feed": feed.name, **run_pipeline(remote_path, feed.list_id)}, None
     except KNOWN_ERRORS as exc:
-        log.error("Processing failed: %s: %s", type(exc).__name__, exc)
-        _last_run = {"status": "error", "file": file_name, "message": str(exc),
-                     "finished_at": finished_at()}
-        return _error_response(exc, file_name)
+        log.error("Processing failed (feed %s): %s: %s", feed.name, type(exc).__name__, exc)
+        response = _error_response(exc, file_name)
+        return {"feed": feed.name, "status": "error", "file": file_name,
+                "http_status": response.status_code, "message": str(exc)}, response
     except Exception:
         # Full traceback goes to the log; the client gets a generic message.
-        log.exception("Unexpected error during processing")
-        _last_run = {"status": "error", "file": file_name, "message": "Internal server error",
-                     "finished_at": finished_at()}
-        return JSONResponse(status_code=500,
-                            content={"status": "error", "message": "Internal server error"})
+        log.exception("Unexpected error during processing (feed %s)", feed.name)
+        response = JSONResponse(status_code=500,
+                                content={"status": "error", "message": "Internal server error"})
+        return {"feed": feed.name, "status": "error", "file": file_name, "http_status": 500,
+                "message": "Internal server error"}, response
+
+
+# Sync (def) endpoints run in FastAPI's thread pool, so blocking SFTP / GPG / MySQL
+# calls do not block the event loop.
+@app.post("/process-file", tags=["processing"], dependencies=[Depends(verify_api_key)])
+def process_file(
+        file_date: Optional[date] = Query(
+            None, description="Date for {date:...} in the file name, e.g. 2026-10-03 (default: today)"),
+        feed: Optional[str] = Query(
+            None, description="Only this feed (e.g. NC). Default: every feed in FEEDS")):
+    """Read, decrypt and save the SBI file of every feed (or one feed)."""
+    global _last_run
+    settings = get_settings()
+    try:
+        feeds = [settings.feed(feed)] if feed else list(settings.feeds)
+    except ConfigError as exc:
+        return _error_response(exc, None)
+    if not _process_lock.acquire(blocking=False):
+        return _error_response(ProcessBusyError("Processing is already running, try again later"),
+                               None)
+    finished_at = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
+    try:
+        results = [_run_feed(f, file_date) for f in feeds]
     finally:
         _process_lock.release()
+
+    if len(results) == 1:  # one feed: same response as before feeds existed
+        result, error = results[0]
+        _last_run = {**result, "finished_at": finished_at()}
+        return error if error is not None else result
+
+    ok = sum(1 for result, error in results if error is None)
+    overall = "success" if ok == len(results) else ("error" if ok == 0 else "partial")
+    body = {"status": overall, "feeds": {result["feed"]: result for result, _ in results}}
+    _last_run = {**body, "finished_at": finished_at()}
+    return body
 
 
 @app.get("/status", tags=["monitoring"], dependencies=[Depends(verify_api_key)])
@@ -231,15 +259,18 @@ def report(
         list_id: Optional[int] = Query(
             None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001"),
         format: Optional[str] = Query(
-            None, pattern="^(txt|csv)$", description="txt (pipe-separated) or csv, default REPORT_FORMAT")):
+            None, pattern="^(txt|csv)$", description="txt (pipe-separated) or csv, default REPORT_FORMAT"),
+        feed: Optional[str] = Query(
+            None, description="Only this feed (e.g. NC). Default: all feeds in one report")):
     """Download the disposition report (not encrypted) to check it before sending."""
     settings = get_settings()
     fmt = format or settings.report_format
-    source_file = posixpath.basename(settings.remote_file_for(file_date))
+    source_file = None
     try:
         if not settings.vicidial_enabled:
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
-        result = report_service.disposition_report(source_file, list_id or settings.report_list_id)
+        feeds = [settings.feed(feed)] if feed else list(settings.feeds)
+        result = report_service.combined_report(file_date, feeds, list_id)
     except KNOWN_ERRORS as exc:
         log.error("Report failed: %s: %s", type(exc).__name__, exc)
         return _error_response(exc, source_file)
@@ -262,7 +293,7 @@ def report_send(
             False, description="Replace the report if it was already uploaded")):
     """Build the report (REPORT_FORMAT), encrypt it with SBI's public key and upload it to SBI."""
     settings = get_settings()
-    source_file = posixpath.basename(settings.remote_file_for(file_date))
+    source_file = None
     remote_path = posixpath.join(settings.report_upload_dir, settings.report_file_for(file_date))
     if not _send_lock.acquire(blocking=False):
         return _error_response(ProcessBusyError("A report upload is already running, try again later"),
@@ -271,7 +302,7 @@ def report_send(
     try:
         if not settings.vicidial_enabled:
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
-        result = report_service.disposition_report(source_file, list_id or settings.report_list_id)
+        result = report_service.combined_report(file_date, list(settings.feeds), list_id)
         text = report_service.render(result["rows"], settings.report_format)
         encrypted = encrypt_data(text.encode("utf-8"), settings.report_gpg_recipient)
         del text  # plain report data only lived in memory
@@ -284,7 +315,8 @@ def report_send(
     log.info("Report sent: %s (%s accounts, %s called)", remote_path, result["accounts"], result["called"])
     return {
         "status": "success",
-        "source_file": source_file,
+        "feeds": result["feeds"],
+        "missing_feeds": result["missing"],
         "uploaded_to": remote_path,
         "format": settings.report_format,
         "bytes": size,

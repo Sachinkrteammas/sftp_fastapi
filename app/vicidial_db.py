@@ -43,11 +43,11 @@ class VicidialInsertError(Exception):
     """Inserting leads into vicidial_list failed; its transaction was rolled back."""
 
 
-def _fixed_values() -> Dict[str, Any]:
+def _fixed_values(list_id: int) -> Dict[str, Any]:
     """Columns that get the same value for every lead (entry_date is NOW() in SQL)."""
     s = get_settings()
     return {
-        "list_id": s.vicidial_list_id,
+        "list_id": list_id,
         "status": "NEW",
         "called_since_last_reset": "N",
         "phone_code": s.vicidial_phone_code,
@@ -97,9 +97,10 @@ def _column_lengths(cursor, table: str, columns: List[str]) -> Dict[str, Any]:
     return {c: lengths[c] for c in columns}
 
 
-def build_leads(records: List[Dict[str, Any]], lengths: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_leads(records: List[Dict[str, Any]], lengths: Dict[str, Any],
+                list_id: int) -> List[Dict[str, Any]]:
     """Turn SBI records into vicidial_list rows (mapped + fixed columns)."""
-    fixed = _fixed_values()
+    fixed = _fixed_values(list_id)
     leads, cut = [], {}
     for record in records:
         lead = {}
@@ -119,16 +120,17 @@ def build_leads(records: List[Dict[str, Any]], lengths: Dict[str, Any]) -> List[
     return leads
 
 
-def insert_leads(conn, records: List[Dict[str, Any]], batch_size: int = 1000) -> int:
+def insert_leads(conn, records: List[Dict[str, Any]], *, list_id: int,
+                 batch_size: int = 1000) -> int:
     """Insert one lead per record in ONE transaction on `conn` and commit it."""
     if not records:
         return 0
     table = get_settings().vicidial_table  # validated as a plain identifier in config.py
-    columns = [c for c, _ in LEAD_MAPPING] + list(_fixed_values())
+    columns = [c for c, _ in LEAD_MAPPING] + list(_fixed_values(list_id))
     cursor = conn.cursor()
     try:
         lengths = _column_lengths(cursor, table, columns)
-        leads = build_leads(records, lengths)
+        leads = build_leads(records, lengths, list_id)
         sql = (f"INSERT INTO `{table}` ({', '.join(f'`{c}`' for c in columns)}, `entry_date`) "
                f"VALUES ({', '.join(['%s'] * len(columns))}, NOW())")
         conn.start_transaction()
@@ -139,7 +141,7 @@ def insert_leads(conn, records: List[Dict[str, Any]], batch_size: int = 1000) ->
             inserted += max(cursor.rowcount, 0)
         conn.commit()
         log.info("VICIdial: %s leads inserted into %s (list_id %s)",
-                 inserted, table, get_settings().vicidial_list_id)
+                 inserted, table, list_id)
         return inserted
     except mysql.connector.Error as exc:
         conn.rollback()

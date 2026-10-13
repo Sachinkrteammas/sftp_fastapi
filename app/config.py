@@ -50,6 +50,18 @@ def _bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+_FEED_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,19}$")
+
+
+@dataclass(frozen=True)
+class Feed:
+    """One kind of SBI file (e.g. FAT, NC): where to read it and which VICIdial list it feeds."""
+    name: str
+    remote_file: str      # template with {date:...}
+    list_id: int          # VICIdial list the leads are saved to
+    report_list_id: int   # VICIdial list the report reads calls from
+
+
 @dataclass(frozen=True)
 class Settings:
     # SFTP
@@ -97,6 +109,7 @@ class Settings:
     report_file_name: str
     report_gpg_recipient: str
     sftp_upload_atomic: bool
+    feeds: tuple
     # App
     process_mode: str
     preview_rows: int
@@ -128,6 +141,20 @@ class Settings:
         day = day or self.today()
         return _DATE_TOKEN.sub(lambda m: day.strftime(m.group(1)), template)
 
+    def feed(self, name: str | None) -> Feed:
+        """Feed by name (case-insensitive); None = the first feed."""
+        if not name:
+            return self.feeds[0]
+        for feed in self.feeds:
+            if feed.name == name.upper():
+                return feed
+        raise ConfigError(f"Unknown feed {name!r}. Configured feeds: "
+                          f"{', '.join(f.name for f in self.feeds)}")
+
+    def feed_file_for(self, feed: Feed, day: date | None = None) -> str:
+        """The feed's remote file with {date:FORMAT} replaced by `day` (default: today)."""
+        return self._with_date(feed.remote_file, day)
+
     def remote_file_for(self, day: date | None = None) -> str:
         """SFTP_REMOTE_FILE with every {date:FORMAT} replaced by `day` (default: today)."""
         return self._with_date(self.sftp_remote_file, day)
@@ -136,7 +163,8 @@ class Settings:
         """Upload name of the encrypted report. Default: SBI file name + _disposition.<fmt>.gpg."""
         template = self.report_file_name
         if not template:
-            base = self.sftp_remote_file.rsplit("/", 1)[-1]
+            source = self.feeds[0].remote_file if self.feeds else self.sftp_remote_file
+            base = source.rsplit("/", 1)[-1]
             for suffix in (".csv.gpg", ".txt.gpg", ".gpg", ".pgp"):
                 if base.lower().endswith(suffix):
                     base = base[: -len(suffix)]
@@ -149,8 +177,10 @@ def _validate(s: Settings) -> None:
     missing = [name for name, value in (
         ("SFTP_HOST", s.sftp_host),
         ("SFTP_USERNAME", s.sftp_username),
-        ("SFTP_REMOTE_FILE", s.sftp_remote_file),
     ) if not value]
+    if not s.feeds:
+        missing.append("SFTP_REMOTE_FILE (or FEEDS)")
+    missing += [f"FEED_{f.name}_REMOTE_FILE" for f in s.feeds if not f.remote_file]
     if not s.sftp_password and not s.sftp_private_key:
         missing.append("SFTP_PASSWORD or SFTP_PRIVATE_KEY")
 
@@ -189,8 +219,10 @@ def _validate(s: Settings) -> None:
         raise ConfigError(f"SFTP_LOGIN_ORDER may only contain: {', '.join(_LOGIN_METHODS)}")
     if not _UTC_OFFSET.match(s.sftp_date_utc_offset):
         raise ConfigError("SFTP_DATE_UTC_OFFSET must look like +05:30")
-    if "{" in _DATE_TOKEN.sub("", s.sftp_remote_file):
-        raise ConfigError("SFTP_REMOTE_FILE: use the date placeholder as {date:%d%m%Y}")
+    for feed in s.feeds:
+        if "{" in _DATE_TOKEN.sub("", feed.remote_file):
+            raise ConfigError(f"Remote file of feed {feed.name}: use the date placeholder as "
+                              "{date:%d%m%Y}")
     if s.report_format not in ("txt", "csv"):
         raise ConfigError("REPORT_FORMAT must be txt or csv")
     if s.report_line_ending not in ("LF", "CRLF"):
@@ -202,6 +234,26 @@ def _validate(s: Settings) -> None:
         raise ConfigError("REPORT_MAX_CALLS must be between 1 and 6 (SBI's report has 6 call slots)")
     if s.sftp_max_file_mb <= 0:
         raise ConfigError("SFTP_MAX_FILE_MB must be greater than 0")
+
+
+def _load_feeds(remote_file: str, list_id: int, report_list_id: int) -> tuple:
+    """FEEDS=FAT,NC -> one Feed per name from FEED_<NAME>_REMOTE_FILE / FEED_<NAME>_LIST_ID.
+
+    Without FEEDS there is one feed (DEFAULT) built from SFTP_REMOTE_FILE and VICIDIAL_LIST_ID,
+    so existing .env files keep working unchanged.
+    """
+    names = [n.strip().upper() for n in _str("FEEDS").split(",") if n.strip()]
+    if not names:
+        return (Feed("DEFAULT", remote_file, list_id, report_list_id),) if remote_file else ()
+    feeds = []
+    for name in names:
+        if not _FEED_NAME.match(name):
+            raise ConfigError(f"FEEDS: invalid name {name!r} (letters, digits, underscore)")
+        if any(f.name == name for f in feeds):
+            raise ConfigError(f"FEEDS: {name} is listed twice")
+        feed_list = _int(f"FEED_{name}_LIST_ID", list_id)
+        feeds.append(Feed(name, _str(f"FEED_{name}_REMOTE_FILE"), feed_list, feed_list))
+    return tuple(feeds)
 
 
 @lru_cache(maxsize=1)
@@ -249,6 +301,8 @@ def get_settings() -> Settings:
         report_file_name=_str("REPORT_FILE_NAME"),
         report_gpg_recipient=_str("REPORT_GPG_RECIPIENT"),
         sftp_upload_atomic=_bool("SFTP_UPLOAD_ATOMIC", True),
+        feeds=_load_feeds(_str("SFTP_REMOTE_FILE"), _int("VICIDIAL_LIST_ID", 5001),
+                          _int("REPORT_LIST_ID", _int("VICIDIAL_LIST_ID", 5001))),
         process_mode=_str("PROCESS_MODE", "preview").lower(),
         preview_rows=_int("PREVIEW_ROWS", 20),
         api_key=os.getenv("API_KEY", ""),

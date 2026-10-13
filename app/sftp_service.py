@@ -285,7 +285,7 @@ def connect_sftp() -> tuple[paramiko.Transport, paramiko.SFTPClient]:
 def read_remote_file(remote_path: str | None = None) -> bytes:
     """Read the whole remote encrypted file into memory and return its bytes."""
     settings = get_settings()
-    path = remote_path or settings.remote_file_for()
+    path = remote_path or settings.feed_file_for(settings.feeds[0])
     max_bytes = settings.sftp_max_file_mb * 1024 * 1024
 
     transport: paramiko.Transport | None = None

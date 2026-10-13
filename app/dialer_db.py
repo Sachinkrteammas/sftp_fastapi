@@ -108,7 +108,7 @@ def check_already_processed(file_hash: str) -> bool:
 
 
 def insert_records(records: list[dict[str, Any]], *, file_name: str,
-                   file_hash: str) -> tuple[int, int]:
+                   file_hash: str, list_id: int) -> tuple[int, int]:
     """Save all records (SbiRecord model) AND the SUCCESS history row in ONE transaction,
     and, if VICIDIAL_DB_HOST is set, one dialer lead per record in vicidial_list.
 
@@ -157,14 +157,14 @@ def insert_records(records: list[dict[str, Any]], *, file_name: str,
 
         leads = 0
         if settings.vicidial_enabled:
-            leads = _insert_vicidial_leads(records)
+            leads = _insert_vicidial_leads(records, list_id)
         try:
             conn.commit()
         except mysql.connector.Error:
             if leads:
                 log.critical("VICIdial leads were committed but saving %s failed: check "
                              "list_id %s before processing this file again",
-                             settings.dialer_target_table, settings.vicidial_list_id)
+                             settings.dialer_target_table, list_id)
             raise
         log.info("Number of records inserted: %s (transaction committed)", inserted)
         return inserted, leads
@@ -188,14 +188,14 @@ def insert_records(records: list[dict[str, Any]], *, file_name: str,
         conn.close()
 
 
-def _insert_vicidial_leads(records: list[dict[str, Any]]) -> int:
+def _insert_vicidial_leads(records: list[dict[str, Any]], list_id: int) -> int:
     """Insert + commit the leads in the VICIdial DB; errors become this module's DB errors."""
     try:
         vici = vicidial_db.connect()
     except vicidial_db.VicidialConnectionError as exc:
         raise DatabaseConnectionError(str(exc)) from exc
     try:
-        return vicidial_db.insert_leads(vici, records, batch_size=BATCH_SIZE)
+        return vicidial_db.insert_leads(vici, records, list_id=list_id, batch_size=BATCH_SIZE)
     except vicidial_db.VicidialInsertError as exc:
         raise DatabaseInsertError(str(exc)) from exc
     finally:
