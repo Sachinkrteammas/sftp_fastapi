@@ -22,8 +22,10 @@ LEAD_MAPPING: Tuple[Tuple[str, str], ...] = (
     ("first_name", "embo_name"),
     ("title", "billing_cycle"),
     ("last_name", "cur_bal"),
-    ("address1", "emp_phone"),
-    ("address2", "additional_phone_4"),
+    ("address1", "address1"),          # not in the SBI file today -> ""
+    ("address2", "emp_phone"),
+    ("middle_initial", "nrr"),
+    ("address3", "additional_phone_4"),
     ("vendor_lead_code", "account_no"),
     ("source_id", "account_no"),
     ("postal_code", "total_amount_due"),
@@ -37,7 +39,7 @@ LEAD_MAPPING: Tuple[Tuple[str, str], ...] = (
 # vicidial_list columns that hold phone numbers: keep only the last PHONE_DIGITS digits
 # (09953416957 -> 9953416957, +91 98765-43210 -> 9876543210). sbi_records keeps SBI's value.
 PHONE_COLUMNS: Tuple[str, ...] = ("phone_number", "alt_phone", "city", "email", "security_phrase",
-                                  "address1", "address2")
+                                  "address2", "address3")
 PHONE_DIGITS = 10
 _NON_DIGIT = re.compile(r"\D")
 
@@ -64,7 +66,6 @@ def _fixed_values(list_id: int) -> Dict[str, Any]:
         "called_since_last_reset": "N",
         "phone_code": s.vicidial_phone_code,
         "gmt_offset_now": s.vicidial_gmt_offset,
-        "address3": "MI",
     }
 
 
