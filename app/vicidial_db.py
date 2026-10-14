@@ -6,6 +6,7 @@ vicidial_list column is cut to fit (with a warning) instead of failing the run.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Tuple
 
 import mysql.connector
@@ -33,6 +34,17 @@ LEAD_MAPPING: Tuple[Tuple[str, str], ...] = (
     ("email", "additional_phone_2"),
     ("security_phrase", "additional_phone_3"),
 )
+
+# vicidial_list columns that hold phone numbers: keep only the last PHONE_DIGITS digits
+# (09953416957 -> 9953416957, +91 98765-43210 -> 9876543210). sbi_records keeps SBI's value.
+PHONE_COLUMNS: Tuple[str, ...] = ("phone_number", "alt_phone", "city", "email", "security_phrase")
+PHONE_DIGITS = 10
+_NON_DIGIT = re.compile(r"\D")
+
+
+def last_digits(value: str, count: int = PHONE_DIGITS) -> str:
+    """Digits only, last `count` of them ("" stays ""; shorter numbers are kept whole)."""
+    return _NON_DIGIT.sub("", value)[-count:]
 
 
 class VicidialConnectionError(Exception):
@@ -107,6 +119,8 @@ def build_leads(records: List[Dict[str, Any]], lengths: Dict[str, Any],
         for column, source in LEAD_MAPPING:
             value = record.get(source)
             value = "" if value is None else str(value)
+            if column in PHONE_COLUMNS:
+                value = last_digits(value)
             limit = lengths.get(column)
             if limit and len(value) > limit:
                 cut[column] = cut.get(column, 0) + 1
