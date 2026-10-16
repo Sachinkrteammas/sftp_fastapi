@@ -129,7 +129,7 @@ def run_pipeline(remote_path: str, list_id: int) -> dict[str, Any]:
 
     try:
         # 6. Decrypt in memory
-        decrypted_data = decrypt_data(encrypted_data)
+        decrypted_data, encoding = decrypt_data(encrypted_data)
         del encrypted_data
 
         # 7-8. Read CSV from memory, validate, transform
@@ -144,6 +144,7 @@ def run_pipeline(remote_path: str, list_id: int) -> dict[str, Any]:
                 "mode": "preview",
                 "file": file_name,
                 "file_hash": file_hash,
+        "encoding": encoding,
                 "columns": result.source_columns,
                 "records_read": result.records_read,
                 "records_valid": result.records_valid,
@@ -168,6 +169,7 @@ def run_pipeline(remote_path: str, list_id: int) -> dict[str, Any]:
         "mode": "save",
         "file": file_name,
         "file_hash": file_hash,
+        "encoding": encoding,
         "records_read": result.records_read,
         "records_valid": result.records_valid,
         "records_skipped": result.records_skipped,
