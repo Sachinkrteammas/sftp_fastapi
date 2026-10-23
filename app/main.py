@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
 
-from . import dialer_db, report_service
+from . import dialer_db, report_service, vicidial_db
 from .config import ConfigError, get_settings
 from .decrypt_service import (DecodingError, DecryptionError, EncryptionError,
                               GpgNotAvailableError, InvalidEncryptedFileError, decrypt_data,
@@ -242,6 +242,34 @@ def process_file(
     body = {"status": overall, "feeds": {result["feed"]: result for result, _ in results}}
     _last_run = {**body, "finished_at": finished_at()}
     return body
+
+
+@app.post("/vicidial/cleanup", tags=["processing"], dependencies=[Depends(verify_api_key)])
+def vicidial_cleanup(
+        dry_run: bool = Query(False, description="Only count what would be deleted")):
+    """Delete leads from before today (IST) in the VICIdial lists of all feeds. Run before 07:50."""
+    settings = get_settings()
+    list_ids = sorted({f.list_id for f in settings.feeds})
+    if not settings.vicidial_enabled:
+        return _error_response(ConfigError("VICIdial DB is not configured (VICIDIAL_DB_HOST)"), None)
+    if not _process_lock.acquire(blocking=False):
+        return _error_response(ProcessBusyError("Processing is running, try the cleanup later"), None)
+    try:
+        today = settings.today()
+        counts = vicidial_db.cleanup_lists(list_ids, today, dry_run=dry_run)
+    except vicidial_db.VicidialConnectionError as exc:
+        return _error_response(DatabaseConnectionError(str(exc)), None)
+    except vicidial_db.VicidialInsertError as exc:
+        return _error_response(DatabaseInsertError(str(exc)), None)
+    finally:
+        _process_lock.release()
+    return {
+        "status": "success",
+        "dry_run": dry_run,
+        "deleted_before": f"{today} 00:00:00",
+        "leads": sum(counts.values()),
+        "per_list": {str(k): v for k, v in counts.items()},
+    }
 
 
 @app.get("/status", tags=["monitoring"], dependencies=[Depends(verify_api_key)])

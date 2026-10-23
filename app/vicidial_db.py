@@ -7,7 +7,8 @@ vicidial_list column is cut to fit (with a warning) instead of failing the run.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from datetime import date
+from typing import Any, Dict, List, Sequence, Tuple
 
 import mysql.connector
 from mysql.connector import errorcode
@@ -168,3 +169,54 @@ def insert_leads(conn, records: List[Dict[str, Any]], *, list_id: int,
         raise
     finally:
         cursor.close()
+
+
+def cleanup_lists(list_ids: Sequence[int], before: date, *, dry_run: bool = False) -> Dict[int, int]:
+    """Delete leads older than `before` (entry_date < that day 00:00) from these lists only.
+
+    Leads entered on `before` or later are never touched, so a late run cannot remove the
+    new day's leads. Their rows in vicidial_hopper (the dial queue) are removed first.
+    Returns {list_id: leads deleted (or that would be deleted with dry_run)}.
+    """
+    list_ids = sorted({int(x) for x in list_ids})
+    if not list_ids:
+        raise VicidialInsertError("No VICIdial lists configured to clean")
+    table = get_settings().vicidial_table  # validated as a plain identifier in config.py
+    cutoff = before.strftime("%Y-%m-%d 00:00:00")
+    marks = ", ".join(["%s"] * len(list_ids))
+    where = f"list_id IN ({marks}) AND entry_date < %s"
+    params = (*list_ids, cutoff)
+
+    conn = connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(f"SELECT list_id, COUNT(*) FROM `{table}` WHERE {where} GROUP BY list_id", params)
+        counts = {int(lid): int(n) for lid, n in cursor.fetchall()}
+        result = {lid: counts.get(lid, 0) for lid in list_ids}
+        if dry_run or not sum(result.values()):
+            log.info("VICIdial cleanup%s: %s leads before %s in lists %s",
+                     " (dry run)" if dry_run else "", sum(result.values()), cutoff, list_ids)
+            return result
+        conn.start_transaction()
+        try:
+            cursor.execute(
+                f"""DELETE h FROM vicidial_hopper h JOIN `{table}` l ON l.lead_id = h.lead_id
+                    WHERE l.list_id IN ({marks}) AND l.entry_date < %s""",
+                params)
+        except mysql.connector.Error as exc:
+            if exc.errno != errorcode.ER_NO_SUCH_TABLE:
+                raise
+            log.warning("VICIdial has no vicidial_hopper table, skipped")
+        cursor.execute(f"DELETE FROM `{table}` WHERE {where}", params)
+        deleted = max(cursor.rowcount, 0)
+        conn.commit()
+        log.info("VICIdial cleanup: %s leads deleted (entry_date before %s) from lists %s",
+                 deleted, cutoff, list_ids)
+        return result
+    except mysql.connector.Error as exc:
+        conn.rollback()
+        log.error("VICIdial cleanup failed, rolled back (mysql errno: %s)", exc.errno)
+        raise VicidialInsertError("VICIdial cleanup failed; nothing was deleted") from exc
+    finally:
+        cursor.close()
+        conn.close()
