@@ -25,7 +25,7 @@ from .processor import (InvalidCSVError, MissingColumnsError, NoValidRecordsErro
                         print_preview, process_csv)
 from .sftp_service import (RemoteFileExistsError, RemoteFileNotFoundError, RemoteFileReadError,
                            RemoteFileWriteError, SftpAuthError, SftpConnectionError,
-                           read_remote_file, upload_file)
+                           list_dir, read_remote_file, upload_file)
 
 log = get_logger("main")
 
@@ -187,10 +187,8 @@ def health() -> Dict[str, str]:
 
 # Sync (def) endpoints run in FastAPI's thread pool, so blocking SFTP / GPG / MySQL
 # calls do not block the event loop.
-def _run_feed(feed, file_date: Optional[date]) -> tuple:
-    """Process one feed. Returns (result dict, error response or None)."""
-    settings = get_settings()
-    remote_path = settings.feed_file_for(feed, file_date)
+def _run_file(feed, remote_path: str) -> tuple:
+    """Process one file of a feed. Returns (result dict, error response or None)."""
     file_name = posixpath.basename(remote_path)
     try:
         return {"feed": feed.name, **run_pipeline(remote_path, feed.list_id)}, None
@@ -206,6 +204,37 @@ def _run_feed(feed, file_date: Optional[date]) -> tuple:
                                 content={"status": "error", "message": "Internal server error"})
         return {"feed": feed.name, "status": "error", "file": file_name, "http_status": 500,
                 "message": "Internal server error"}, response
+
+
+def _run_feed(feed, file_date: Optional[date], listings: Dict[str, Any]) -> tuple:
+    """Process every file of today (or file_date) that belongs to this feed.
+
+    listings: {folder: [file names] or the exception raised while listing it}.
+    One file -> that file's result (same as before); several -> {"files": {name: result}}.
+    """
+    settings = get_settings()
+    pattern = settings.feed_file_for(feed, file_date)
+    folder = posixpath.dirname(pattern)
+    names = listings[folder]
+    if isinstance(names, Exception):
+        response = _error_response(names, posixpath.basename(pattern))
+        return {"feed": feed.name, "status": "error", "file": posixpath.basename(pattern),
+                "http_status": response.status_code, "message": str(names)}, response
+    files = sorted(n for n in names if settings.assign_feed(n, file_date) == feed)
+    if not files:
+        exc = RemoteFileNotFoundError(f"Remote file not found: {pattern}")
+        response = _error_response(exc, posixpath.basename(pattern))
+        return {"feed": feed.name, "status": "error", "file": posixpath.basename(pattern),
+                "http_status": response.status_code, "message": str(exc)}, response
+    results = [_run_file(feed, posixpath.join(folder, n)) for n in files]
+    if len(results) == 1:
+        return results[0]
+    ok = sum(1 for _, error in results if error is None)
+    status_ = "success" if ok == len(results) else ("error" if ok == 0 else "partial")
+    first_error = next((error for _, error in results if error is not None), None)
+    return ({"feed": feed.name, "status": status_,
+             "files": {r["file"]: r for r, _ in results}},
+            first_error if ok == 0 else None)
 
 
 # Sync (def) endpoints run in FastAPI's thread pool, so blocking SFTP / GPG / MySQL
@@ -228,7 +257,15 @@ def process_file(
                                None)
     finished_at = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
     try:
-        results = [_run_feed(f, file_date) for f in feeds]
+        # List each folder once, then match today's files to feeds (wildcards allowed)
+        listings: Dict[str, Any] = {}
+        for folder in sorted({posixpath.dirname(settings.feed_file_for(f, file_date)) for f in feeds}):
+            try:
+                listings[folder] = list_dir(folder)
+            except KNOWN_ERRORS as exc:
+                log.error("Listing %s failed: %s: %s", folder, type(exc).__name__, exc)
+                listings[folder] = exc
+        results = [_run_feed(f, file_date, listings) for f in feeds]
     finally:
         _process_lock.release()
 

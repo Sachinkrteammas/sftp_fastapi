@@ -386,3 +386,28 @@ def upload_file(remote_path: str, data: bytes, *, overwrite: bool = False) -> in
                     resource.close()
                 except Exception:  # cleanup must never hide the real error
                     log.debug("Error while closing %s", name)
+
+
+def list_dir(remote_dir: str) -> list:
+    """File names in a remote folder (one login)."""
+    transport: paramiko.Transport | None = None
+    sftp: paramiko.SFTPClient | None = None
+    try:
+        transport, sftp = connect_sftp()
+        try:
+            names = sftp.listdir(remote_dir)
+        except FileNotFoundError as exc:
+            raise RemoteFileNotFoundError(f"Remote folder not found: {remote_dir}") from exc
+        except PermissionError as exc:
+            raise RemoteFileReadError(f"Permission denied listing remote folder: {remote_dir}") from exc
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            raise RemoteFileReadError(f"Could not list remote folder: {remote_dir}") from exc
+        log.info("Remote folder %s: %s files", remote_dir, len(names))
+        return names
+    finally:
+        for name, resource in (("sftp", sftp), ("transport", transport)):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:  # cleanup must never hide the real error
+                    log.debug("Error while closing %s", name)

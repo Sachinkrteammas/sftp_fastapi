@@ -88,6 +88,29 @@ def load_sbi_records(source_file: str) -> List[Dict[str, Any]]:
         conn.close()
 
 
+def saved_files_for(feed, day, s=None) -> List[str]:
+    """Saved source files of `day` that belong to `feed` (wildcards allowed, same rule as
+    /process-file: a file matching several feeds belongs to the most specific one)."""
+    s = s or get_settings()
+    pattern = s.feed_file_for(feed, day).rsplit("/", 1)[-1]
+    if "*" not in pattern:
+        return [pattern]
+    like = (pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            .replace("*", "%"))
+    table = s.dialer_target_table  # validated identifier
+    conn = dialer_db.connect_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT DISTINCT source_file FROM `{table}` WHERE source_file LIKE %s", (like,))
+        names = [row[0] for row in cursor.fetchall()]
+    except mysql.connector.Error as exc:
+        log.error("Reading %s failed (mysql errno: %s)", table, exc.errno)
+        raise dialer_db.DatabaseInsertError(f"Could not read {table}") from exc
+    finally:
+        conn.close()
+    return sorted(n for n in names if s.assign_feed(n, day) == feed)
+
+
 def _optional_query(cursor, sql: str, params: Sequence[Any], what: str) -> List[Dict[str, Any]]:
     """Run a query on a table that some VICIdial installs may lack; missing table -> []."""
     try:
@@ -266,19 +289,26 @@ def combined_report(day, feeds, list_override: int | None = None) -> Dict[str, A
     per_feed: Dict[str, Any] = {}
     missing: List[str] = []
     for feed in feeds:
-        source_file = s.feed_file_for(feed, day).rsplit("/", 1)[-1]
         list_id = list_override or feed.report_list_id
-        try:
-            part = disposition_report(source_file, list_id)
-        except ReportNotFoundError:
-            log.warning("Report: no records for feed %s (%s), skipped", feed.name, source_file)
+        source_files = saved_files_for(feed, day, s)
+        totals = {"accounts": 0, "called": 0, "calls": 0}
+        found = []
+        for source_file in source_files:
+            try:
+                part = disposition_report(source_file, list_id)
+            except ReportNotFoundError:
+                continue
+            rows += part["rows"]
+            found.append(source_file)
+            for key in totals:
+                totals[key] += part[key]
+        if not found:
+            log.warning("Report: no records for feed %s (%s), skipped", feed.name,
+                        s.feed_file_for(feed, day).rsplit("/", 1)[-1])
             missing.append(feed.name)
-            per_feed[feed.name] = {"source_file": source_file, "list_id": list_id, "accounts": 0}
-            continue
-        rows += part["rows"]
-        per_feed[feed.name] = {"source_file": source_file, "list_id": list_id,
-                               "accounts": part["accounts"], "called": part["called"],
-                               "calls": part["calls"]}
+        per_feed[feed.name] = {"source_file": ", ".join(found) or
+                               s.feed_file_for(feed, day).rsplit("/", 1)[-1],
+                               "list_id": list_id, **totals}
     if not rows:
         raise ReportNotFoundError("No records saved for any feed on this date: "
                                   + ", ".join(f"{n} ({v['source_file']})" for n, v in per_feed.items()))

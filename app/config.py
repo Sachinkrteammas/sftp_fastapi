@@ -6,8 +6,10 @@ object is printed or logged by accident.
 from __future__ import annotations
 
 import os
+import posixpath
 import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -155,6 +157,20 @@ class Settings:
         """The feed's remote file with {date:FORMAT} replaced by `day` (default: today)."""
         return self._with_date(feed.remote_file, day)
 
+    def assign_feed(self, file_name: str, day: date | None = None) -> Feed | None:
+        """The feed a remote file name belongs to on `day`, or None.
+
+        A feed's file name may contain '*' (any text), e.g. MAS_AHM_CD3_FAT_S_HB_*{date}.csv.gpg
+        accepts ..._FAT_S_HB_TEST_<date> and ..._FAT_S_HB_ABC_<date>. If a file matches several
+        feeds, the most specific pattern (longest without '*') wins, so e.g. ..._PTP_HB1_<date>
+        goes to a PTP_HB1 feed and not to a broader ..._PTP_*<date> feed.
+        """
+        matches = [f for f in self.feeds
+                   if fnmatchcase(file_name, posixpath.basename(self.feed_file_for(f, day)))]
+        if not matches:
+            return None
+        return max(matches, key=lambda f: len(posixpath.basename(f.remote_file).replace("*", "")))
+
     def remote_file_for(self, day: date | None = None) -> str:
         """SFTP_REMOTE_FILE with every {date:FORMAT} replaced by `day` (default: today)."""
         return self._with_date(self.sftp_remote_file, day)
@@ -220,6 +236,9 @@ def _validate(s: Settings) -> None:
     if not _UTC_OFFSET.match(s.sftp_date_utc_offset):
         raise ConfigError("SFTP_DATE_UTC_OFFSET must look like +05:30")
     for feed in s.feeds:
+        if "*" in posixpath.dirname(feed.remote_file):
+            raise ConfigError(f"Remote file of feed {feed.name}: '*' is only allowed in the file "
+                              "name, not in the folder")
         if "{" in _DATE_TOKEN.sub("", feed.remote_file):
             raise ConfigError(f"Remote file of feed {feed.name}: use the date placeholder as "
                               "{date:%d%m%Y}")
