@@ -77,8 +77,8 @@ async def lifespan(_: FastAPI):
     setup_logging(settings.log_level, settings.log_file)
     log.info("Service started | mode=%s", settings.process_mode)
     for feed in settings.feeds:
-        log.info("Feed %s | list %s | today: %s", feed.name, feed.list_id,
-                 settings.feed_file_for(feed))
+        log.info("Feed %s | list %s | today: %s%s", feed.name, feed.list_id,
+                 settings.feed_file_for(feed), "" if feed.in_report else " | not in report")
     if not settings.is_save_mode:
         log.warning("PREVIEW mode: decrypted data is printed to console, nothing is saved to DB")
     yield
@@ -336,7 +336,8 @@ def report(
     try:
         if not settings.vicidial_enabled:
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
-        feeds = [settings.feed(feed)] if feed else list(settings.feeds)
+        # ?feed=X shows any feed; the default report has only feeds with FEED_<NAME>_REPORT on
+        feeds = [settings.feed(feed)] if feed else [f for f in settings.feeds if f.in_report]
         result = report_service.combined_report(file_date, feeds, list_id)
     except KNOWN_ERRORS as exc:
         log.error("Report failed: %s: %s", type(exc).__name__, exc)
@@ -369,7 +370,8 @@ def report_send(
     try:
         if not settings.vicidial_enabled:
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
-        result = report_service.combined_report(file_date, list(settings.feeds), list_id)
+        result = report_service.combined_report(
+            file_date, [f for f in settings.feeds if f.in_report], list_id)
         text = report_service.render(result["rows"], settings.report_format)
         encrypted = encrypt_data(text.encode("utf-8"), settings.report_gpg_recipient)
         del text  # plain report data only lived in memory

@@ -62,6 +62,7 @@ class Feed:
     remote_file: str      # template with {date:...}
     list_id: int          # VICIdial list the leads are saved to
     report_list_id: int   # VICIdial list the report reads calls from
+    in_report: bool = True  # FEED_<NAME>_REPORT=false leaves it out of /report/send
 
 
 @dataclass(frozen=True)
@@ -271,7 +272,8 @@ def _load_feeds(remote_file: str, list_id: int, report_list_id: int) -> tuple:
         if any(f.name == name for f in feeds):
             raise ConfigError(f"FEEDS: {name} is listed twice")
         feed_list = _int(f"FEED_{name}_LIST_ID", list_id)
-        feeds.append(Feed(name, _str(f"FEED_{name}_REMOTE_FILE"), feed_list, feed_list))
+        feeds.append(Feed(name, _str(f"FEED_{name}_REMOTE_FILE"), feed_list, feed_list,
+                          _bool(f"FEED_{name}_REPORT", True)))
     return tuple(feeds)
 
 
