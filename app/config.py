@@ -112,6 +112,9 @@ class Settings:
     report_file_name: str
     report_gpg_recipient: str
     sftp_upload_atomic: bool
+    report_prefix_codes: tuple
+    report_prefix_value: str
+    report_prefix_file_name: str
     feeds: tuple
     # App
     process_mode: str
@@ -171,6 +174,14 @@ class Settings:
         if not matches:
             return None
         return max(matches, key=lambda f: len(posixpath.basename(f.remote_file).replace("*", "")))
+
+    def prefix_report_file_for(self, day: date | None = None) -> str:
+        """Upload name of the prefix report. Default: report name + _<REPORT_PREFIX_VALUE>."""
+        if self.report_prefix_file_name:
+            return self._with_date(self.report_prefix_file_name, day)
+        name = self.report_file_for(day)
+        stem, dot, ext = name.partition(".")
+        return f"{stem}_{self.report_prefix_value}{dot}{ext}"
 
     def remote_file_for(self, day: date | None = None) -> str:
         """SFTP_REMOTE_FILE with every {date:FORMAT} replaced by `day` (default: today)."""
@@ -247,6 +258,11 @@ def _validate(s: Settings) -> None:
         raise ConfigError("REPORT_FORMAT must be txt or csv")
     if s.report_line_ending not in ("LF", "CRLF"):
         raise ConfigError("REPORT_LINE_ENDING must be LF or CRLF")
+    if not s.report_prefix_codes or not all(c.isdigit() for c in s.report_prefix_codes):
+        raise ConfigError("REPORT_PREFIX_CODES must be digits separated by commas, e.g. 72,42")
+    if ("/" in s.report_prefix_file_name
+            or "{" in _DATE_TOKEN.sub("", s.report_prefix_file_name)):
+        raise ConfigError("REPORT_PREFIX_FILE_NAME must be a file name; date placeholder as {date:%d%m%Y}")
     if "/" in s.report_file_name or "{" in _DATE_TOKEN.sub("", s.report_file_name):
         raise ConfigError("REPORT_FILE_NAME must be a file name (folder goes in REPORT_UPLOAD_DIR); "
                           "date placeholder as {date:%d%m%Y}")
@@ -321,6 +337,11 @@ def get_settings() -> Settings:
         report_upload_dir=_str("REPORT_UPLOAD_DIR", "/TO_SBICMASCALL01").rstrip("/") or "/",
         report_file_name=_str("REPORT_FILE_NAME"),
         report_gpg_recipient=_str("REPORT_GPG_RECIPIENT"),
+        # Prefix report: only calls dialled with these prefixes, extra column CALLING_PREFIX
+        report_prefix_codes=tuple(c.strip() for c in _str("REPORT_PREFIX_CODES", "72,42").split(",")
+                                  if c.strip()),
+        report_prefix_value=_str("REPORT_PREFIX_VALUE", "160"),
+        report_prefix_file_name=_str("REPORT_PREFIX_FILE_NAME"),
         sftp_upload_atomic=_bool("SFTP_UPLOAD_ATOMIC", True),
         feeds=_load_feeds(_str("SFTP_REMOTE_FILE"), _int("VICIDIAL_LIST_ID", 5001),
                           _int("REPORT_LIST_ID", _int("VICIDIAL_LIST_ID", 5001))),

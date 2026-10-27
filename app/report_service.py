@@ -57,6 +57,10 @@ REPORT_HEADERS: List[str] = (
 )
 
 
+PREFIX_COLUMN = "CALLING_PREFIX"
+PREFIX_REPORT_HEADERS: List[str] = REPORT_HEADERS + [PREFIX_COLUMN]
+
+
 class ReportNotFoundError(Exception):
     """No SBI records saved for the requested file."""
 
@@ -123,8 +127,39 @@ def _optional_query(cursor, sql: str, params: Sequence[Any], what: str) -> List[
         raise
 
 
-def load_vicidial(accounts: List[str], list_id: int) -> Dict[str, Any]:
-    """Leads, calls (newest first), active callbacks and DNC numbers for these accounts."""
+def _dial_prefixes(cursor, lead_ids: Sequence[Any]) -> Dict[Any, str]:
+    """{vicidial_log.uniqueid: dial prefix} for the calls of these leads.
+
+    The prefix is in Asterisk's call_log: number_dialed = prefix + phone_code + phone_number
+    (e.g. 42 + 1 + 9879554705). That row is matched to the call by lead (the last 10 digits of
+    caller_code), phone number and time (the dial is up to 3 minutes before the call).
+    """
+    found: Dict[Any, tuple] = {}
+    for part in _chunks(list(lead_ids)):
+        marks = ", ".join(["%s"] * len(part))
+        cursor.execute(
+            f"""SELECT vl.uniqueid, cl.start_time,
+                       LEFT(cl.number_dialed, CHAR_LENGTH(cl.number_dialed)
+                            - CHAR_LENGTH(COALESCE(vl.phone_code, ''))
+                            - CHAR_LENGTH(vl.phone_number)) AS dial_prefix
+                FROM vicidial_log vl
+                JOIN call_log cl
+                     ON RIGHT(cl.caller_code, 10) + 0 = vl.lead_id
+                    AND cl.number_dialed LIKE CONCAT('%%', vl.phone_number)
+                    AND cl.start_time BETWEEN vl.call_date - INTERVAL 180 SECOND
+                                          AND vl.call_date + INTERVAL 5 SECOND
+                WHERE vl.lead_id IN ({marks}) AND vl.phone_number <> ''""",
+            tuple(part))
+        for row in cursor.fetchall():
+            current = found.get(row["uniqueid"])
+            if current is None or (row["start_time"] or datetime.min) > current[0]:
+                found[row["uniqueid"]] = (row["start_time"] or datetime.min, row["dial_prefix"] or "")
+    return {uid: prefix for uid, (_, prefix) in found.items()}
+
+
+def load_vicidial(accounts: List[str], list_id: int, with_prefix: bool = False) -> Dict[str, Any]:
+    """Leads, calls (newest first), active callbacks and DNC numbers for these accounts.
+    with_prefix: each call also gets "dial_prefix" (from Asterisk's call_log)."""
     s = get_settings()
     leads: List[Dict[str, Any]] = []
     calls: List[Dict[str, Any]] = []
@@ -153,7 +188,7 @@ def load_vicidial(accounts: List[str], list_id: int) -> Dict[str, Any]:
                            FROM_UNIXTIME(val.dispo_epoch + val.dispo_sec) AS disp_dt,
                            vl.status AS disp_code,
                            COALESCE(cs.status_name, ss.status_name, vl.status) AS disp_desc,
-                           vl.user AS agent_id
+                           vl.user AS agent_id, vl.uniqueid AS uniqueid
                     FROM vicidial_log vl
                     LEFT JOIN vicidial_campaign_statuses cs
                            ON cs.status = vl.status AND cs.campaign_id = vl.campaign_id
@@ -170,6 +205,11 @@ def load_vicidial(accounts: List[str], list_id: int) -> Dict[str, Any]:
                     WHERE lead_id IN ({marks}) AND status IN ('ACTIVE', 'LIVE')""",
                 part, "callbacks")
 
+        if with_prefix and calls:
+            prefixes = _dial_prefixes(cursor, lead_ids)
+            for call in calls:
+                call["dial_prefix"] = prefixes.get(call["uniqueid"], "")
+
         phones = sorted({lead["phone_number"] for lead in leads if lead["phone_number"]})
         for part in _chunks(phones):
             marks = ", ".join(["%s"] * len(part))
@@ -184,8 +224,14 @@ def load_vicidial(accounts: List[str], list_id: int) -> Dict[str, Any]:
     return {"leads": leads, "calls": calls, "callbacks": callbacks, "dnc": dnc}
 
 
-def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: int) -> List[Dict[str, str]]:
-    """One report row per SBI record (left join: accounts never called get DIAL_CNT 0)."""
+def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: int,
+               prefixes: Sequence[str] = (), prefix_value: str = "") -> List[Dict[str, str]]:
+    """One report row per SBI record (left join: accounts never called get DIAL_CNT 0).
+
+    With prefixes (prefix report): only calls dialled with one of these prefixes count, an
+    account without such a call is left out, and CALLING_PREFIX = prefix_value is added.
+    """
+    headers = PREFIX_REPORT_HEADERS if prefixes else REPORT_HEADERS
     leads_by_account: Dict[str, List[Dict[str, Any]]] = {}
     for lead in vici["leads"]:
         leads_by_account.setdefault(str(lead["source_id"]), []).append(lead)
@@ -199,15 +245,18 @@ def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: i
             callback_by_lead[cb["lead_id"]] = cb["callback_time"]
 
     rows = []
-    for number, record in enumerate(records, 1):
-        row = {header: _text(record.get(column))
-               for header, column in zip(SBI_HEADERS, SbiRecord.COLUMNS)}
-        row["RECORD_NUM"] = str(number)
+    for record in records:
         leads = leads_by_account.get(str(record.get("account_no") or ""), [])
-
         # An account loaded more than once has several leads: merge their calls
         calls = sorted((c for lead in leads for c in calls_by_lead.get(lead["lead_id"], [])),
                        key=lambda c: c["call_dt"] or datetime.min, reverse=True)
+        if prefixes:
+            calls = [c for c in calls if c.get("dial_prefix") in prefixes]
+            if not calls:
+                continue
+        row = {header: _text(record.get(column))
+               for header, column in zip(SBI_HEADERS, SbiRecord.COLUMNS)}
+        row["RECORD_NUM"] = str(len(rows) + 1)
         row["AC"] = ""                         # left blank
         row["TZ"] = row["TIME_ZONE"]           # time zone as SBI sent it (e.g. IND)
         row["DIAL_CNT"] = str(len(calls))
@@ -230,13 +279,15 @@ def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: i
                   or any((c["disp_code"] or "").upper() == "DNC" for c in calls))
         row["DONOTCALL"] = "Y" if is_dnc else "N"
         row["DYNAORDER"] = ""
-        rows.append({header: row.get(header, "") for header in REPORT_HEADERS})
+        if prefixes:
+            row[PREFIX_COLUMN] = prefix_value
+        rows.append({header: row.get(header, "") for header in headers})
     return rows
 
 
-def to_csv(rows: List[Dict[str, str]]) -> str:
+def to_csv(rows: List[Dict[str, str]], headers: Sequence[str] = REPORT_HEADERS) -> str:
     out = io.StringIO()
-    writer = csv.DictWriter(out, fieldnames=REPORT_HEADERS, lineterminator="\n")
+    writer = csv.DictWriter(out, fieldnames=list(headers), lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
     return out.getvalue()
@@ -247,37 +298,45 @@ def _txt_value(value: str) -> str:
     return value.replace("|", " ").replace("\r", " ").replace("\n", " ")
 
 
-def to_txt(rows: List[Dict[str, str]], line_ending: str = "\n") -> str:
+def to_txt(rows: List[Dict[str, str]], line_ending: str = "\n",
+           headers: Sequence[str] = REPORT_HEADERS) -> str:
     """Pipe-separated text: header line, then one line per record, same columns as the CSV."""
-    lines = ["|".join(REPORT_HEADERS)]
-    lines += ["|".join(_txt_value(row[h]) for h in REPORT_HEADERS) for row in rows]
+    lines = ["|".join(headers)]
+    lines += ["|".join(_txt_value(row[h]) for h in headers) for row in rows]
     return line_ending.join(lines) + line_ending
 
 
-def render(rows: List[Dict[str, str]], fmt: str) -> str:
+def render(rows: List[Dict[str, str]], fmt: str, headers: Sequence[str] = REPORT_HEADERS) -> str:
     """fmt 'txt' (pipe-separated, REPORT_LINE_ENDING) or 'csv'."""
     if fmt == "csv":
-        return to_csv(rows)
-    return to_txt(rows, "\r\n" if get_settings().report_line_ending == "CRLF" else "\n")
+        return to_csv(rows, headers)
+    return to_txt(rows, "\r\n" if get_settings().report_line_ending == "CRLF" else "\n", headers)
 
 
-def disposition_report(source_file: str, list_id: int) -> Dict[str, Any]:
+def disposition_report(source_file: str, list_id: int, prefixes: Sequence[str] = (),
+                       prefix_value: str = "") -> Dict[str, Any]:
     """Build the report rows for one SBI file. Returns rows + counts for logging."""
     s = get_settings()
     records = load_sbi_records(source_file)
     if not records:
         raise ReportNotFoundError(f"No records saved in {s.dialer_target_table} for {source_file}")
     accounts = sorted({str(r["account_no"]) for r in records if r.get("account_no")})
-    vici = load_vicidial(accounts, list_id)
-    rows = build_rows(records, vici, s.report_max_calls)
+    vici = load_vicidial(accounts, list_id, with_prefix=bool(prefixes))
+    rows = build_rows(records, vici, s.report_max_calls, prefixes, prefix_value)
     called = sum(1 for r in rows if r["DIAL_CNT"] != "0")
+    if prefixes:  # only calls with these prefixes count
+        log.info("Prefix report %s (list %s, prefixes %s): %s accounts with such calls",
+                 source_file, list_id, ",".join(prefixes), len(rows))
+        return {"rows": rows, "accounts": len(rows), "leads": len(vici["leads"]),
+                "called": called, "calls": sum(int(r["DIAL_CNT"]) for r in rows)}
     log.info("Report %s (list %s): %s accounts, %s matched leads, %s called, %s calls",
              source_file, list_id, len(rows), len(vici["leads"]), called, len(vici["calls"]))
     return {"rows": rows, "accounts": len(rows), "leads": len(vici["leads"]),
             "called": called, "calls": len(vici["calls"])}
 
 
-def combined_report(day, feeds, list_override: int | None = None) -> Dict[str, Any]:
+def combined_report(day, feeds, list_override: int | None = None,
+                    prefixes: Sequence[str] = (), prefix_value: str = "") -> Dict[str, Any]:
     """One report for several feeds (e.g. FAT + NC): each feed's accounts are matched against
     that feed's own VICIdial list, then all rows are joined and RECORD_NUM runs 1..N.
 
@@ -295,7 +354,7 @@ def combined_report(day, feeds, list_override: int | None = None) -> Dict[str, A
         found = []
         for source_file in source_files:
             try:
-                part = disposition_report(source_file, list_id)
+                part = disposition_report(source_file, list_id, prefixes, prefix_value)
             except ReportNotFoundError:
                 continue
             rows += part["rows"]
@@ -309,6 +368,9 @@ def combined_report(day, feeds, list_override: int | None = None) -> Dict[str, A
         per_feed[feed.name] = {"source_file": ", ".join(found) or
                                s.feed_file_for(feed, day).rsplit("/", 1)[-1],
                                "list_id": list_id, **totals}
+    if not rows and prefixes and len(missing) < len(per_feed):
+        # records exist, but none of their calls used these prefixes
+        raise ReportNotFoundError(f"No calls with prefix {'/'.join(prefixes)} on this date")
     if not rows:
         raise ReportNotFoundError("No records saved for any feed on this date: "
                                   + ", ".join(f"{n} ({v['source_file']})" for n, v in per_feed.items()))

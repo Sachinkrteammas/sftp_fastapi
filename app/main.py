@@ -319,70 +319,62 @@ def last_status() -> Dict[str, Any]:
     }
 
 
-@app.get("/report", tags=["reports"], dependencies=[Depends(verify_api_key)])
-def report(
-        file_date: Optional[date] = Query(
-            None, description="Date of the SBI file ({date:...} in SFTP_REMOTE_FILE), default today"),
-        list_id: Optional[int] = Query(
-            None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001"),
-        format: Optional[str] = Query(
-            None, pattern="^(txt|csv)$", description="txt (pipe-separated) or csv, default REPORT_FORMAT"),
-        feed: Optional[str] = Query(
-            None, description="Only this feed (e.g. NC). Default: all feeds in one report")):
-    """Download the disposition report (not encrypted) to check it before sending."""
+def _report_options(prefix: bool) -> dict:
+    """Arguments for combined_report: the prefix report keeps only calls with the
+    REPORT_PREFIX_CODES prefixes and adds CALLING_PREFIX = REPORT_PREFIX_VALUE."""
     settings = get_settings()
-    fmt = format or settings.report_format
-    source_file = None
+    if not prefix:
+        return {}
+    return {"prefixes": settings.report_prefix_codes, "prefix_value": settings.report_prefix_value}
+
+
+def _report_download(file_date, list_id, fmt, feed, prefix: bool):
+    settings = get_settings()
+    fmt = fmt or settings.report_format
     try:
         if not settings.vicidial_enabled:
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
         # ?feed=X shows any feed; the default report has only feeds with FEED_<NAME>_REPORT on
         feeds = [settings.feed(feed)] if feed else [f for f in settings.feeds if f.in_report]
-        result = report_service.combined_report(file_date, feeds, list_id)
+        result = report_service.combined_report(file_date, feeds, list_id, **_report_options(prefix))
     except KNOWN_ERRORS as exc:
         log.error("Report failed: %s: %s", type(exc).__name__, exc)
-        return _error_response(exc, source_file)
-    name = settings.report_file_for(file_date)
+        return _error_response(exc, None)
+    name = settings.prefix_report_file_for(file_date) if prefix else settings.report_file_for(file_date)
     name = name[:-4] if name.endswith(".gpg") else name
     if not name.endswith("." + fmt):
         name = name.rsplit(".", 1)[0] + "." + fmt
-    return Response(content=report_service.render(result["rows"], fmt),
+    headers = report_service.PREFIX_REPORT_HEADERS if prefix else report_service.REPORT_HEADERS
+    return Response(content=report_service.render(result["rows"], fmt, headers),
                     media_type="text/csv" if fmt == "csv" else "text/plain",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
-@app.post("/report/send", tags=["reports"], dependencies=[Depends(verify_api_key)])
-def report_send(
-        file_date: Optional[date] = Query(
-            None, description="Date of the SBI file, default today"),
-        list_id: Optional[int] = Query(
-            None, description="VICIdial list to read calls from (default REPORT_LIST_ID), e.g. 1001"),
-        overwrite: bool = Query(
-            False, description="Replace the report if it was already uploaded")):
-    """Build the report (REPORT_FORMAT), encrypt it with SBI's public key and upload it to SBI."""
+def _report_send(file_date, list_id, overwrite: bool, prefix: bool):
     settings = get_settings()
-    source_file = None
-    remote_path = posixpath.join(settings.report_upload_dir, settings.report_file_for(file_date))
+    name = settings.prefix_report_file_for(file_date) if prefix else settings.report_file_for(file_date)
+    remote_path = posixpath.join(settings.report_upload_dir, name)
     if not _send_lock.acquire(blocking=False):
         return _error_response(ProcessBusyError("A report upload is already running, try again later"),
-                               source_file)
+                               None)
     started = time.monotonic()
     try:
         if not settings.vicidial_enabled:
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
         result = report_service.combined_report(
-            file_date, [f for f in settings.feeds if f.in_report], list_id)
-        text = report_service.render(result["rows"], settings.report_format)
+            file_date, [f for f in settings.feeds if f.in_report], list_id, **_report_options(prefix))
+        headers = report_service.PREFIX_REPORT_HEADERS if prefix else report_service.REPORT_HEADERS
+        text = report_service.render(result["rows"], settings.report_format, headers)
         encrypted = encrypt_data(text.encode("utf-8"), settings.report_gpg_recipient)
         del text  # plain report data only lived in memory
         size = upload_file(remote_path, encrypted, overwrite=overwrite)
     except KNOWN_ERRORS as exc:
         log.error("Report send failed: %s: %s", type(exc).__name__, exc)
-        return _error_response(exc, source_file)
+        return _error_response(exc, None)
     finally:
         _send_lock.release()
     log.info("Report sent: %s (%s accounts, %s called)", remote_path, result["accounts"], result["called"])
-    return {
+    body = {
         "status": "success",
         "feeds": result["feeds"],
         "missing_feeds": result["missing"],
@@ -394,6 +386,51 @@ def report_send(
         "calls": result["calls"],
         "seconds": round(time.monotonic() - started, 2),
     }
+    if prefix:
+        body["prefixes"] = list(settings.report_prefix_codes)
+        body["calling_prefix"] = settings.report_prefix_value
+    return body
+
+
+_DATE_HELP = "Date of the SBI file ({date:...} in the file name), default today"
+_LIST_HELP = "VICIdial list to read calls from (default: each feed's list), e.g. 1001"
+_FORMAT_HELP = "txt (pipe-separated) or csv, default REPORT_FORMAT"
+_FEED_HELP = "Only this feed (e.g. NC). Default: all feeds in one report"
+
+
+@app.get("/report", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report(file_date: Optional[date] = Query(None, description=_DATE_HELP),
+           list_id: Optional[int] = Query(None, description=_LIST_HELP),
+           format: Optional[str] = Query(None, pattern="^(txt|csv)$", description=_FORMAT_HELP),
+           feed: Optional[str] = Query(None, description=_FEED_HELP)):
+    """Download the disposition report (not encrypted) to check it before sending."""
+    return _report_download(file_date, list_id, format, feed, prefix=False)
+
+
+@app.post("/report/send", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report_send(file_date: Optional[date] = Query(None, description=_DATE_HELP),
+                list_id: Optional[int] = Query(None, description=_LIST_HELP),
+                overwrite: bool = Query(False, description="Replace the report if it was already uploaded")):
+    """Build the report (REPORT_FORMAT), encrypt it with SBI's public key and upload it to SBI."""
+    return _report_send(file_date, list_id, overwrite, prefix=False)
+
+
+@app.get("/report/prefix", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report_prefix(file_date: Optional[date] = Query(None, description=_DATE_HELP),
+                  list_id: Optional[int] = Query(None, description=_LIST_HELP),
+                  format: Optional[str] = Query(None, pattern="^(txt|csv)$", description=_FORMAT_HELP),
+                  feed: Optional[str] = Query(None, description=_FEED_HELP)):
+    """Download the prefix report: only calls dialled with REPORT_PREFIX_CODES (e.g. 72, 42),
+    plus column CALLING_PREFIX = REPORT_PREFIX_VALUE (e.g. 160)."""
+    return _report_download(file_date, list_id, format, feed, prefix=True)
+
+
+@app.post("/report/prefix/send", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report_prefix_send(file_date: Optional[date] = Query(None, description=_DATE_HELP),
+                       list_id: Optional[int] = Query(None, description=_LIST_HELP),
+                       overwrite: bool = Query(False, description="Replace the report if it was already uploaded")):
+    """Build the prefix report, encrypt it with SBI's public key and upload it to SBI."""
+    return _report_send(file_date, list_id, overwrite, prefix=True)
 
 
 @app.get("/history", tags=["monitoring"], dependencies=[Depends(verify_api_key)])
