@@ -115,6 +115,7 @@ class Settings:
     report_prefix_codes: tuple
     report_prefix_value: str
     report_prefix_file_name: str
+    report_exclude_campaigns: tuple
     feeds: tuple
     # App
     process_mode: str
@@ -342,6 +343,9 @@ def get_settings() -> Settings:
                                   if c.strip()),
         report_prefix_value=_str("REPORT_PREFIX_VALUE", "160"),
         report_prefix_file_name=_str("REPORT_PREFIX_FILE_NAME"),
+        # Calls made from these VICIdial campaigns (e.g. SBIMAN manual calling) are left out of reports
+        report_exclude_campaigns=tuple(c.strip() for c in _str("REPORT_EXCLUDE_CAMPAIGNS").split(",")
+                                       if c.strip()),
         sftp_upload_atomic=_bool("SFTP_UPLOAD_ATOMIC", True),
         feeds=_load_feeds(_str("SFTP_REMOTE_FILE"), _int("VICIDIAL_LIST_ID", 5001),
                           _int("REPORT_LIST_ID", _int("VICIDIAL_LIST_ID", 5001))),

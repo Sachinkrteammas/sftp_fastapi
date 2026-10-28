@@ -181,6 +181,10 @@ def load_vicidial(accounts: List[str], list_id: int, with_prefix: bool = False) 
             leads += cursor.fetchall()
 
         lead_ids = [lead["lead_id"] for lead in leads]
+        # REPORT_EXCLUDE_CAMPAIGNS: drop calls/callbacks made from those campaigns (e.g. SBIMAN)
+        excluded = s.report_exclude_campaigns
+        skip_sql = (f" AND campaign_id NOT IN ({', '.join(['%s'] * len(excluded))})"
+                    if excluded else "")
         for part in _chunks(lead_ids):
             marks = ", ".join(["%s"] * len(part))
             cursor.execute(
@@ -195,15 +199,15 @@ def load_vicidial(accounts: List[str], list_id: int, with_prefix: bool = False) 
                     LEFT JOIN vicidial_statuses ss ON ss.status = vl.status
                     LEFT JOIN vicidial_agent_log val
                            ON val.uniqueid = vl.uniqueid AND val.user = vl.user
-                    WHERE vl.lead_id IN ({marks})
+                    WHERE vl.lead_id IN ({marks}){skip_sql.replace("campaign_id", "vl.campaign_id")}
                     ORDER BY vl.call_date DESC""",
-                tuple(part))
+                (*part, *excluded))
             calls += cursor.fetchall()
             callbacks += _optional_query(
                 cursor,
                 f"""SELECT lead_id, callback_time FROM vicidial_callbacks
-                    WHERE lead_id IN ({marks}) AND status IN ('ACTIVE', 'LIVE')""",
-                part, "callbacks")
+                    WHERE lead_id IN ({marks}) AND status IN ('ACTIVE', 'LIVE'){skip_sql}""",
+                (*part, *excluded), "callbacks")
 
         if with_prefix and calls:
             prefixes = _dial_prefixes(cursor, lead_ids)
