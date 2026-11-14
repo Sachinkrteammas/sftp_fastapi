@@ -73,6 +73,13 @@ def _text(value: Any) -> str:
     return str(value)
 
 
+def _call_dt(value: Any) -> str:
+    """CALLn_DT as collx24 expects: MM/DD/YYYY HH:MI:SS AM/PM, e.g. 11/13/2026 04:59:02 PM."""
+    if hasattr(value, "strftime"):
+        return value.strftime("%m/%d/%Y %I:%M:%S %p")
+    return _text(value)
+
+
 def _chunks(values: Sequence[Any]):
     for start in range(0, len(values), CHUNK):
         yield values[start:start + CHUNK]
@@ -266,7 +273,7 @@ def build_rows(records: List[Dict[str, Any]], vici: Dict[str, Any], max_calls: i
         row["DIAL_CNT"] = str(len(calls))
         for n, call in enumerate(calls[:max_calls], 1):
             row[f"CALL{n}_PHONE"] = _text(call["call_phone"])
-            row[f"CALL{n}_DT"] = _text(call["call_dt"])
+            row[f"CALL{n}_DT"] = _call_dt(call["call_dt"])
             row["DISP1_DT" if n == 1 else f"DISP{n}_ID"] = _text(call["disp_dt"])
             row[f"DISP{n}_C"] = _text(call["disp_code"])
             row[f"DISPOSITION{n}_DESC"] = _text(call["disp_desc"])
