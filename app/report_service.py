@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Sequence
 
@@ -63,6 +64,10 @@ PREFIX_REPORT_HEADERS: List[str] = REPORT_HEADERS + [PREFIX_COLUMN]
 
 class ReportNotFoundError(Exception):
     """No SBI records saved for the requested file."""
+
+
+class ReportCsvError(Exception):
+    """An uploaded report CSV does not have the report's columns or is unreadable."""
 
 
 def _text(value: Any) -> str:
@@ -322,6 +327,51 @@ def render(rows: List[Dict[str, str]], fmt: str, headers: Sequence[str] = REPORT
     if fmt == "csv":
         return to_csv(rows, headers)
     return to_txt(rows, "\r\n" if get_settings().report_line_ending == "CRLF" else "\n", headers)
+
+
+_OLD_CALL_DT = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
+_EXCEL_NUMBER = re.compile(r"\d(\.\d+)?E\+\d+", re.IGNORECASE)
+
+
+def rows_from_csv(data: bytes) -> tuple:
+    """Rows of a report CSV exported earlier (/report?format=csv), checked for SBI.
+
+    The header must be the normal report's 102 columns or the prefix report's 103.
+    CALLn_DT still in the old YYYY-MM-DD HH:MM:SS format is converted like the report does.
+    Returns (rows, headers).
+    """
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("cp1252")
+    reader = csv.reader(io.StringIO(text, newline=""))
+    header = [h.strip() for h in next(reader, [])]
+    if header == REPORT_HEADERS:
+        headers = REPORT_HEADERS
+    elif header == PREFIX_REPORT_HEADERS:
+        headers = PREFIX_REPORT_HEADERS
+    else:
+        raise ReportCsvError(
+            f"CSV header has {len(header)} columns; expected the report's "
+            f"{len(REPORT_HEADERS)} (normal) or {len(PREFIX_REPORT_HEADERS)} (prefix) columns")
+    rows = []
+    for line_no, values in enumerate(reader, 2):
+        if not any(v.strip() for v in values):
+            continue  # blank line
+        if len(values) != len(headers):
+            raise ReportCsvError(f"Line {line_no} has {len(values)} columns, expected {len(headers)}")
+        row = dict(zip(headers, values))
+        if _EXCEL_NUMBER.fullmatch(row["ACCOUNT_NO"].strip()):
+            raise ReportCsvError(f"Line {line_no}: ACCOUNT_NO '{row['ACCOUNT_NO']}' was changed "
+                                 "by Excel; export the report again")
+        for n in range(1, 7):
+            value = row[f"CALL{n}_DT"].strip()
+            if _OLD_CALL_DT.fullmatch(value):
+                row[f"CALL{n}_DT"] = _call_dt(datetime.strptime(value, "%Y-%m-%d %H:%M:%S"))
+        rows.append(row)
+    if not rows:
+        raise ReportCsvError("CSV has no data rows")
+    return rows, headers
 
 
 def disposition_report(source_file: str, list_id: int, prefixes: Sequence[str] = (),

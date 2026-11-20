@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 
 from . import dialer_db, report_service, vicidial_db
@@ -55,6 +55,7 @@ ERROR_STATUS: list[tuple[type[Exception], int]] = [
     (GpgNotAvailableError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (ConfigError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (report_service.ReportNotFoundError, status.HTTP_404_NOT_FOUND),
+    (report_service.ReportCsvError, 422),
     (RemoteFileExistsError, status.HTTP_409_CONFLICT),
     (RemoteFileWriteError, status.HTTP_502_BAD_GATEWAY),
     (EncryptionError, status.HTTP_500_INTERNAL_SERVER_ERROR),
@@ -431,6 +432,49 @@ def report_prefix_send(file_date: Optional[date] = Query(None, description=_DATE
                        overwrite: bool = Query(False, description="Replace the report if it was already uploaded")):
     """Build the prefix report, encrypt it with SBI's public key and upload it to SBI."""
     return _report_send(file_date, list_id, overwrite, prefix=True)
+
+
+@app.post("/report/upload-csv", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report_upload_csv(
+        file: UploadFile = File(..., description="Report CSV exported earlier (102 or 103 columns)"),
+        file_name: Optional[str] = Query(
+            None, description="Upload name, default the CSV name as .txt.gpg "
+                              "(MAS_AHM_FLOW_160_17112026.csv -> MAS_AHM_FLOW_160_17112026.txt.gpg)"),
+        overwrite: bool = Query(False, description="Replace the report if it was already uploaded")):
+    """Send a saved report CSV to SBI: converted to the report's txt, encrypted, uploaded."""
+    settings = get_settings()
+    name = (file_name or "").strip() or posixpath.splitext(
+        posixpath.basename((file.filename or "").replace("\\", "/")))[0] + ".txt.gpg"
+    if "/" in name or "\\" in name or name.startswith("."):
+        return JSONResponse(status_code=422, content={
+            "status": "error", "message": "file_name must be a file name, e.g. MAS_AHM_FLOW_17112026.txt.gpg"})
+    remote_path = posixpath.join(settings.report_upload_dir, name)
+    if not _send_lock.acquire(blocking=False):
+        return _error_response(ProcessBusyError("A report upload is already running, try again later"),
+                               None)
+    started = time.monotonic()
+    try:
+        rows, headers = report_service.rows_from_csv(file.file.read())
+        text = report_service.render(rows, "txt", headers)
+        encrypted = encrypt_data(text.encode("utf-8"), settings.report_gpg_recipient)
+        del text  # plain report data only lived in memory
+        size = upload_file(remote_path, encrypted, overwrite=overwrite)
+    except KNOWN_ERRORS as exc:
+        log.error("Report CSV upload failed: %s: %s", type(exc).__name__, exc)
+        return _error_response(exc, file.filename)
+    finally:
+        _send_lock.release()
+    log.info("Report CSV sent: %s -> %s (%s rows)", file.filename, remote_path, len(rows))
+    return {
+        "status": "success",
+        "source_csv": file.filename,
+        "uploaded_to": remote_path,
+        "format": "txt",
+        "columns": len(headers),
+        "rows": len(rows),
+        "bytes": size,
+        "seconds": round(time.monotonic() - started, 2),
+    }
 
 
 @app.get("/history", tags=["monitoring"], dependencies=[Depends(verify_api_key)])
