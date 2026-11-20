@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Upload
 from fastapi.responses import JSONResponse, Response
 
 from . import dialer_db, report_service, vicidial_db
+from .email_service import EmailNotConfiguredError, EmailSendError, send_email
 from .config import ConfigError, get_settings
 from .decrypt_service import (DecodingError, DecryptionError, EncryptionError,
                               GpgNotAvailableError, InvalidEncryptedFileError, decrypt_data,
@@ -56,6 +57,8 @@ ERROR_STATUS: list[tuple[type[Exception], int]] = [
     (ConfigError, status.HTTP_500_INTERNAL_SERVER_ERROR),
     (report_service.ReportNotFoundError, status.HTTP_404_NOT_FOUND),
     (report_service.ReportCsvError, 422),
+    (EmailNotConfiguredError, status.HTTP_500_INTERNAL_SERVER_ERROR),
+    (EmailSendError, status.HTTP_502_BAD_GATEWAY),
     (RemoteFileExistsError, status.HTTP_409_CONFLICT),
     (RemoteFileWriteError, status.HTTP_502_BAD_GATEWAY),
     (EncryptionError, status.HTTP_500_INTERNAL_SERVER_ERROR),
@@ -432,6 +435,57 @@ def report_prefix_send(file_date: Optional[date] = Query(None, description=_DATE
                        overwrite: bool = Query(False, description="Replace the report if it was already uploaded")):
     """Build the prefix report, encrypt it with SBI's public key and upload it to SBI."""
     return _report_send(file_date, list_id, overwrite, prefix=True)
+
+
+def _csv_name(name: str) -> str:
+    """MAS_AHM_FLOW_NEW_19112026.txt.gpg -> MAS_AHM_FLOW_NEW_19112026.csv"""
+    name = name[:-4] if name.endswith(".gpg") else name
+    return name.rsplit(".", 1)[0] + ".csv"
+
+
+@app.post("/report/email", tags=["reports"], dependencies=[Depends(verify_api_key)])
+def report_email(file_date: Optional[date] = Query(None, description=_DATE_HELP)):
+    """E-mail the normal report and the prefix report as CSV attachments to MAIL_TO.
+    A report with no rows (e.g. no 72/42 calls) is left out and noted in the mail."""
+    settings = get_settings()
+    day = file_date or settings.today()
+    started = time.monotonic()
+    attachments, lines, sent = [], [], {}
+    try:
+        if not settings.vicidial_enabled:
+            raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
+        feeds = [f for f in settings.feeds if f.in_report]
+        for prefix, label in ((False, "Normal report"), (True, "Prefix report")):
+            name = _csv_name(settings.prefix_report_file_for(day) if prefix
+                             else settings.report_file_for(day))
+            try:
+                result = report_service.combined_report(day, feeds, None, **_report_options(prefix))
+            except report_service.ReportNotFoundError as exc:
+                lines.append(f"{label}: not attached - {exc}")
+                sent[label] = {"attached": False, "reason": str(exc)}
+                continue
+            headers = report_service.PREFIX_REPORT_HEADERS if prefix else report_service.REPORT_HEADERS
+            data = report_service.render(result["rows"], "csv", headers).encode("utf-8")
+            attachments.append((name, data, "text/csv"))
+            lines.append(f"{label}: {name} - {result['accounts']} accounts, "
+                         f"{result['called']} called, {result['calls']} calls")
+            sent[label] = {"attached": True, "file": name, "accounts": result["accounts"],
+                           "called": result["called"], "calls": result["calls"]}
+        if not attachments:
+            raise report_service.ReportNotFoundError(f"No report data for {day:%d-%m-%Y}")
+        body = (f"SBI disposition reports for {day:%d-%m-%Y}\n\n" + "\n".join(lines)
+                + "\n\nThis is an automated mail.\n")
+        recipients = send_email(f"SBI disposition reports {day:%d-%m-%Y}", body, attachments)
+    except KNOWN_ERRORS as exc:
+        log.error("Report e-mail failed: %s: %s", type(exc).__name__, exc)
+        return _error_response(exc, None)
+    return {
+        "status": "success",
+        "date": day.isoformat(),
+        "sent_to": recipients,
+        "reports": sent,
+        "seconds": round(time.monotonic() - started, 2),
+    }
 
 
 @app.post("/report/upload-csv", tags=["reports"], dependencies=[Depends(verify_api_key)])

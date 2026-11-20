@@ -52,6 +52,11 @@ def _bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _addresses(name: str) -> tuple:
+    """Comma separated e-mail addresses."""
+    return tuple(a.strip() for a in _str(name).split(",") if a.strip())
+
+
 _FEED_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,19}$")
 
 
@@ -116,6 +121,15 @@ class Settings:
     report_prefix_value: str
     report_prefix_file_name: str
     report_exclude_campaigns: tuple
+    # SMTP: /report/email sends both reports as CSV attachments
+    smtp_host: str
+    smtp_port: int
+    smtp_security: str
+    smtp_username: str
+    smtp_password: str = field(repr=False)
+    mail_from: str
+    mail_to: tuple
+    mail_cc: tuple
     feeds: tuple
     # App
     process_mode: str
@@ -271,6 +285,10 @@ def _validate(s: Settings) -> None:
         raise ConfigError("REPORT_MAX_CALLS must be between 1 and 6 (SBI's report has 6 call slots)")
     if s.sftp_max_file_mb <= 0:
         raise ConfigError("SFTP_MAX_FILE_MB must be greater than 0")
+    if s.smtp_security not in ("starttls", "ssl", "none"):
+        raise ConfigError("SMTP_SECURITY must be starttls, ssl or none")
+    if not 1 <= s.smtp_port <= 65535:
+        raise ConfigError("SMTP_PORT must be between 1 and 65535")
 
 
 def _load_feeds(remote_file: str, list_id: int, report_list_id: int) -> tuple:
@@ -347,6 +365,14 @@ def get_settings() -> Settings:
         report_exclude_campaigns=tuple(c.strip() for c in _str("REPORT_EXCLUDE_CAMPAIGNS").split(",")
                                        if c.strip()),
         sftp_upload_atomic=_bool("SFTP_UPLOAD_ATOMIC", True),
+        smtp_host=_str("SMTP_HOST"),
+        smtp_port=_int("SMTP_PORT", 587),
+        smtp_security=_str("SMTP_SECURITY", "starttls").lower(),
+        smtp_username=_str("SMTP_USERNAME"),
+        smtp_password=os.getenv("SMTP_PASSWORD", ""),
+        mail_from=_str("MAIL_FROM") or _str("SMTP_USERNAME"),
+        mail_to=_addresses("MAIL_TO"),
+        mail_cc=_addresses("MAIL_CC"),
         feeds=_load_feeds(_str("SFTP_REMOTE_FILE"), _int("VICIDIAL_LIST_ID", 5001),
                           _int("REPORT_LIST_ID", _int("VICIDIAL_LIST_ID", 5001))),
         process_mode=_str("PROCESS_MODE", "preview").lower(),
