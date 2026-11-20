@@ -322,6 +322,34 @@ def to_txt(rows: List[Dict[str, str]], line_ending: str = "\n",
     return line_ending.join(lines) + line_ending
 
 
+def to_xlsx(rows: List[Dict[str, str]], headers: Sequence[str] = REPORT_HEADERS,
+            sheet: str = "Report") -> bytes:
+    """Excel workbook with every cell stored as text, so Excel keeps leading zeros and all
+    19 digits of ACCOUNT_NO / phone numbers (a CSV opened in Excel loses them)."""
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font
+
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet(sheet[:31])
+    ws.freeze_panes = "A2"
+
+    def cell(value: str, bold: bool = False) -> WriteOnlyCell:
+        c = WriteOnlyCell(ws, value=value)
+        c.data_type = "s"       # always text, also for values starting with '=' (no formulas)
+        c.number_format = "@"
+        if bold:
+            c.font = Font(bold=True)
+        return c
+
+    ws.append([cell(h, bold=True) for h in headers])
+    for row in rows:
+        ws.append([cell(row[h]) for h in headers])
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
 def render(rows: List[Dict[str, str]], fmt: str, headers: Sequence[str] = REPORT_HEADERS) -> str:
     """fmt 'txt' (pipe-separated, REPORT_LINE_ENDING) or 'csv'."""
     if fmt == "csv":

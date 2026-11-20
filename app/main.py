@@ -437,15 +437,18 @@ def report_prefix_send(file_date: Optional[date] = Query(None, description=_DATE
     return _report_send(file_date, list_id, overwrite, prefix=True)
 
 
-def _csv_name(name: str) -> str:
-    """MAS_AHM_FLOW_NEW_19112026.txt.gpg -> MAS_AHM_FLOW_NEW_19112026.csv"""
+_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx_name(name: str) -> str:
+    """MAS_AHM_FLOW_NEW_19112026.txt.gpg -> MAS_AHM_FLOW_NEW_19112026.xlsx"""
     name = name[:-4] if name.endswith(".gpg") else name
-    return name.rsplit(".", 1)[0] + ".csv"
+    return name.rsplit(".", 1)[0] + ".xlsx"
 
 
 @app.post("/report/email", tags=["reports"], dependencies=[Depends(verify_api_key)])
 def report_email(file_date: Optional[date] = Query(None, description=_DATE_HELP)):
-    """E-mail the normal report and the prefix report as CSV attachments to MAIL_TO.
+    """E-mail the normal report and the prefix report as Excel (.xlsx) attachments to MAIL_TO.
     A report with no rows (e.g. no 72/42 calls) is left out and noted in the mail."""
     settings = get_settings()
     day = file_date or settings.today()
@@ -456,8 +459,8 @@ def report_email(file_date: Optional[date] = Query(None, description=_DATE_HELP)
             raise ConfigError("Report needs the VICIdial DB: set VICIDIAL_DB_HOST in .env")
         feeds = [f for f in settings.feeds if f.in_report]
         for prefix, label in ((False, "Normal report"), (True, "Prefix report")):
-            name = _csv_name(settings.prefix_report_file_for(day) if prefix
-                             else settings.report_file_for(day))
+            name = _xlsx_name(settings.prefix_report_file_for(day) if prefix
+                              else settings.report_file_for(day))
             try:
                 result = report_service.combined_report(day, feeds, None, **_report_options(prefix))
             except report_service.ReportNotFoundError as exc:
@@ -465,8 +468,8 @@ def report_email(file_date: Optional[date] = Query(None, description=_DATE_HELP)
                 sent[label] = {"attached": False, "reason": str(exc)}
                 continue
             headers = report_service.PREFIX_REPORT_HEADERS if prefix else report_service.REPORT_HEADERS
-            data = report_service.render(result["rows"], "csv", headers).encode("utf-8")
-            attachments.append((name, data, "text/csv"))
+            data = report_service.to_xlsx(result["rows"], headers, sheet=label)
+            attachments.append((name, data, _XLSX))
             lines.append(f"{label}: {name} - {result['accounts']} accounts, "
                          f"{result['called']} called, {result['calls']} calls")
             sent[label] = {"attached": True, "file": name, "accounts": result["accounts"],
